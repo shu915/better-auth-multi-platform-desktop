@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    # better-auth (once added) is pinned to the web app's version (see CLAUDE.md), and a PR for it
+    # is the reminder that the web app has to move too. Do not merge it on its own; raise both
+    # repositories together. It is the authentication library, so a missed release must not go
+    # unnoticed. The Tauri JS packages (@tauri-apps/*) move with the Rust crates below: bump the
+    # npm and cargo sides together, or the IPC between them can break.
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]

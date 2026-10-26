@@ -1,0 +1,28 @@
+claude-progress.txt (desktop)
+最終更新: 2026-10-26
+新しいセッションは、最初にこのファイルと CLAUDE.md を読む。Web 側の認証のルールは Web の docs/design.md。手本はモバイルの src/lib/sign-in-*.ts。
+
+## 状況: 土台づくり
+Tauri 2 + React + TypeScript の雛形が動く(tauri dev でウィンドウが開く)。認証はまだ何もない。
+
+## できていること
+- 雛形(main に入っている)
+- GitHub のルールセット protect-main、シークレットスキャン、Dependabot
+- 実行中: chore/harness ブランチで CI、hooks、evaluator、CLAUDE.md、ESLint、Vitest を足している(PR 前)
+
+## これから
+1. ハーネスの PR をマージ(CI の check が通ること)
+2. 設計: 戻り方は独自スキーム(betterauthmulti://)、Keychain に保存、Go と Web への HTTP は Rust から(WebView からは呼ばない)
+3. Rust: state + PKCE、deep link の検証、/api/mobile/exchange への引き換え、Keychain、/api/auth/token で JWT
+4. 画面: ログイン、プロフィールの閲覧と編集(name は Web、bio は Go)、退会
+5. Google の連携とサインイン(動いてから)
+
+## 決めたこと
+- 範囲: メールのログイン、プロフィール、退会 → 動いたら Google
+- 配布は自分の Mac だけ(署名・公証なし)
+- 識別子 com.shu915.authpractice.desktop、アプリ名 Auth Practice
+- 「Web の口は /api/mobile/* をそのまま使う」(名前の一般化は、後で考える)
+
+## 既知の注意
+- macOS では deep link のスキームはビルドした .app を入れたときに登録される(tauri dev では届かないことがある)
+- Web の /api/auth/expo-authorization-proxy の open redirect(モバイルと共通の未対応)
