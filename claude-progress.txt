@@ -1,29 +1,42 @@
 claude-progress.txt (desktop)
-最終更新: 2026-10-26
+最終更新: 2026-10-27
 新しいセッションは、最初にこのファイルと CLAUDE.md を読む。Web 側の認証のルールは Web の docs/design.md。手本はモバイルの src/lib/sign-in-*.ts。
 
-## 状況: 段階 1 完了(Rust と IPC、Keychain)
-Rust から Mac の Keychain に保存・確認・削除ができる(tauri dev で確認済み)。認証はまだ何もない。
+## 状況: 段階 2 完了(ログインとログアウト)
+メールのリンクでログインし、再起動しても維持され、ログアウトできる。ローカルの Web と Go で、実機(Mac)の .app で確認済み。プロフィール、退会、Google は、まだ。
 
-## できていること
-- 雛形(main に入っている)
-- GitHub のルールセット protect-main、シークレットスキャン、Dependabot
-- CI、hooks、evaluator、CLAUDE.md、ESLint、Vitest(PR #1、main)
-- 段階 1: src-tauri/src/secret.rs(項目名の許可リスト、値の検証、keyring v4 で保存・確認・削除。値は JS に返さない)と、練習用の画面(feat/ipc-keychain、PR 前)
+## できていること(main と、feat/deep-link)
+- 雛形、ルールセット protect-main、CI、hooks、evaluator、ESLint、Vitest(main)
+- 判断(src-tauri/src/sign_in_rules.rs): state、PKCE、pending(10 分、3 件、1 回で使い切り)、リンクの検証。モバイルの sign-in-rules.ts に当たる(main)
+- 通信と保管(auth.rs、config.rs、session_cookie.rs、secret.rs): メールの要求、引き換え、Keychain、ログアウト(main)
+- 画面(src/App.tsx、src/lib/auth*.ts): ログイン、ログイン中、ログアウト(main)
+- deep link(feat/deep-link、PR 前): tauri-plugin-deep-link で betterauthmulti:// を Rust が受け取る(起動時は get_current、実行中は on_open_url)。結果は Rust が保持し、画面は take_auth_outcome で取る(イベントは合図だけ)。レビュー(3 回)を反映済み
 
 ## これから
-1. 段階 1 の PR をマージ
-2. 設計: 戻り方は独自スキーム(betterauthmulti://)、Keychain に保存、Go と Web への HTTP は Rust から(WebView からは呼ばない)
-3. Rust: state + PKCE、deep link の検証、/api/mobile/exchange への引き換え、Keychain、/api/auth/token で JWT
-4. 画面: ログイン、プロフィールの閲覧と編集(name は Web、bio は Go)、退会
-5. Google の連携とサインイン(動いてから)
+1. feat/deep-link の PR を作ってマージ
+2. 段階 3: プロフィールの閲覧と編集(JWT を /api/auth/token で取り、Go の bio、Web の name)。Go の URL(API_URL)をビルド時に埋め込む(config.rs に足す)
+3. 段階 4: 退会(メールの再入力、5 分以内のログイン)
+4. 段階 5: Google の連携とサインイン(Web の open redirect の修正を先に)
+5. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認。無料の Apple Development 証明書で署名すると、ビルドし直しても Keychain の許可を聞かれない
 
 ## 決めたこと
 - 範囲: メールのログイン、プロフィール、退会 → 動いたら Google
-- 配布は自分の Mac だけ(署名・公証なし)
+- 配布は自分の Mac だけ(公証なし)
 - 識別子 com.shu915.authpractice.desktop、アプリ名 Auth Practice
-- 「Web の口は /api/mobile/* をそのまま使う」(名前の一般化は、後で考える)
+- Web の口は /api/mobile/* をそのまま使う(名前の一般化は、後で考える)
+- 秘密は Rust と Keychain だけ。JS には、Keychain を触るコマンドも、deep link の権限も渡さない。JS の権限は event の購読(listen、unlisten)だけ
+- Web の URL は、ビルド時に AUTH_WEB_URL で埋め込む。デバッグは http://localhost:3000、リリースは https 必須
+
+## .app を試すとき(deep link は、ビルドした .app を /Applications に入れたときだけ届く)
+- ビルド: npm run tauri build -- --debug --bundles app(デバッグビルドは localhost に繋げる。リリースは https 必須)
+- 入れ替え: rm -rf "/Applications/Auth Practice.app" && cp -R src-tauri/target/debug/bundle/macos/"Auth Practice.app" /Applications/
+- ログを見る: "/Applications/Auth Practice.app/Contents/MacOS/tauri-app" をターミナルから起動(デバッグビルドは [auth] link outcome: … を出す。秘密は出さない)
+- 偽リンクを試す: open -g "betterauthmulti:///?state=zzz&code=$(date +%s)"(code は毎回変える。同じ code は 2 回目から無視される。-g がないと open が前に出す)
+- ビルドし直すと、Keychain の許可を聞かれる(署名がないため)。「常に許可」を選ぶ
 
 ## 既知の注意
-- macOS では deep link のスキームはビルドした .app を入れたときに登録される(tauri dev では届かないことがある)
 - Web の /api/auth/expo-authorization-proxy の open redirect(モバイルと共通の未対応)
+- 引き換えが失敗すると、そのリンクは使い切りで、再試行できない(もう一度リンクを頼む。設計どおり)
+- リリースビルドは、診断を何も出さない(段階 6 で見る)
+- Dependabot の glib(Linux 用、Tauri が固定)は、更新できないと失敗扱いになる。Mac には関係ない
+- 残りのリモートブランチの削除(あとでまとめて)
