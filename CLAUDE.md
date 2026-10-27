@@ -51,6 +51,11 @@ Tauri 2(Rust)/ React 19 / TypeScript / Vite 8 / Vitest 5 / ESLint 9
 - `betterauthmulti://` は、同じ Mac の別のアプリ(モバイルのシミュレーターのアプリ、`target/` の `.app`)にも登録されていることがある。メールのリンクを押しても、画面が変わらないときは、リンクが別のアプリに渡った可能性がある。`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump | grep -B3 -A3 betterauthmulti` で調べ、不要なものは `lsregister -u <.app のパス>` で外す。手動で試すときは、`/Applications` の `.app` だけを残す
 - Claude の実行環境からは、ログインキーチェーンが見えないことがある(`find-identity` が 0 件になる)。署名付きのビルドは、人が自分のターミナルで実行する。署名が付いたかの確認(`codesign`)は、Claude もできる
 
+## 退会の限界(受け入れたもの)
+- `delete_account` は、画面の操作があったかを確かめない。確認のメールは Web が照合するが、プロフィール画面がメールを表示するので、WebView の JS が侵害されると、ログイン直後の数分は、操作なしで退会できる。完全に止めるには Rust からネイティブの確認ダイアログを出す必要がある(依存と権限が増える)。配布が自分の Mac だけなので、受け入れる
+- Keychain の削除に失敗しても `Deleted` を返す(退会は済んでいる)。無効なセッションは、次の 401 で消える
+- 20 秒でタイムアウトしても Web の処理は続く。次の試行が 401 なら、画面は「前回の退会が完了していた可能性」と伝える
+
 ## 型の方針
 - TypeScript は `strict: true`。`any` は使わない
 - 型は書くか推論に任せる。黙らせる回避は使わない: `as unknown as X`、`@ts-ignore`、`@ts-expect-error`、`eslint-disable`

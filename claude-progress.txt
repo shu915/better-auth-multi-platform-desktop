@@ -1,23 +1,22 @@
 claude-progress.txt (desktop)
-最終更新: 2026-10-27
+最終更新: 2026-10-28
 新しいセッションは、最初にこのファイルと CLAUDE.md を読む。Web 側の認証のルールは Web の docs/design.md。手本はモバイルの src/lib/sign-in-*.ts。
 
-## 状況: 段階 2 完了(ログインとログアウト)
-メールのリンクでログインし、再起動しても維持され、ログアウトできる。ローカルの Web と Go で、実機(Mac)の .app で確認済み。プロフィール、退会、Google は、まだ。
+## 状況: 段階 4 完了(ログイン、ログアウト、プロフィールの閲覧と編集、退会)
+ローカルの Web と Go で、実機(Mac)の署名付き .app で確認済み。確認した退会: 違うメールは断られる、ログインが古い(5 分超)と「入り直して」の案内、入り直してからの退会の成功、退会後に Go の bio も消えている。Google と、本番(インターネット)での確認は、まだ。
 
-## できていること(main と、feat/deep-link)
-- 雛形、ルールセット protect-main、CI、hooks、evaluator、ESLint、Vitest(main)
-- 判断(src-tauri/src/sign_in_rules.rs): state、PKCE、pending(10 分、3 件、1 回で使い切り)、リンクの検証。モバイルの sign-in-rules.ts に当たる(main)
-- 通信と保管(auth.rs、config.rs、session_cookie.rs、secret.rs): メールの要求、引き換え、Keychain、ログアウト(main)
-- 画面(src/App.tsx、src/lib/auth*.ts): ログイン、ログイン中、ログアウト(main)
-- deep link(feat/deep-link、PR 前): tauri-plugin-deep-link で betterauthmulti:// を Rust が受け取る(起動時は get_current、実行中は on_open_url)。結果は Rust が保持し、画面は take_auth_outcome で取る(イベントは合図だけ)。レビュー(3 回)を反映済み
+## できていること(main と、feat/delete-account)
+- 雛形、ルールセット protect-main、CI、hooks、evaluator、ESLint、Vitest、署名(main)
+- ログイン・ログアウト・deep link(sign_in_rules.rs、auth.rs、config.rs、session_cookie.rs、secret.rs、lib.rs)。結果は Rust が保持し、画面は take_auth_outcome で取る(イベントは合図だけ)
+- プロフィール(profile.rs、profile_rules.rs、api_parse.rs、src/lib/profile-*.ts、App.tsx): 名前は Web、bio は Go。閲覧表示 →「編集」で編集フォーム
+- 退会(feat/delete-account、PR 前): account.rs の delete_account が Web の DELETE /api/mobile/account を Bearer で呼ぶ(確認のメールは Web が突き合わせる)。成功でセッションを消す。画面は「退会」ボタン → メールの確認フォーム(src/lib/delete-account.ts)
 
 ## これから
-1. feat/deep-link の PR を作ってマージ
-2. 段階 3: プロフィールの閲覧と編集(JWT を /api/auth/token で取り、Go の bio、Web の name)。Go の URL(API_URL)をビルド時に埋め込む(config.rs に足す)
-3. 段階 4: 退会(メールの再入力、5 分以内のログイン)
-4. 段階 5: Google の連携とサインイン(Web の open redirect の修正を先に)
-5. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認(署名付きで。リリースビルドは、診断を何も出さない点も見る)
+1. 段階 4(退会)の PR をマージ
+2. Web の open redirect(/api/auth/expo-authorization-proxy)の修正を、別の小さな PR で
+3. 段階 5: Google の連携、解除、連携済みのサインイン(システムのブラウザを Rust から開く)
+4. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認(署名付きで。リリースビルドは、診断を何も出さない点も見る)
+5. あとで: Web の /api/mobile/* の名前の一般化(Web、モバイル、デスクトップを同時に。例 /api/native/*)
 
 ## 決めたこと
 - 範囲: メールのログイン、プロフィール、退会 → 動いたら Google
@@ -29,12 +28,13 @@ claude-progress.txt (desktop)
 
 ## .app を試すとき(deep link は、ビルドした .app を /Applications に入れたときだけ届く)
 - ビルド(署名付き。人が自分のターミナルで): IDENTITY=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1) して APPLE_SIGNING_IDENTITY="$IDENTITY" npm run tauri build -- --debug --bundles app(デバッグビルドは localhost に繋げる。リリースは https 必須)。詳しくは CLAUDE.md の「署名」
-- 入れ替え: rm -rf "/Applications/Auth Practice.app" && cp -R src-tauri/target/debug/bundle/macos/"Auth Practice.app" /Applications/
+- 入れ替え: アプリを終了して rm -rf "/Applications/Auth Practice.app" && ditto src-tauri/target/debug/bundle/macos/"Auth Practice.app" "/Applications/Auth Practice.app"(署名を保つため ditto)。target/ 側の .app も登録されるので、lsregister -u で外す(CLAUDE.md の「署名」)。メールのリンクが古い .app に渡ると、古い画面が出る
 - ログを見る: "/Applications/Auth Practice.app/Contents/MacOS/tauri-app" をターミナルから起動(デバッグビルドは [auth] link outcome: … を出す。秘密は出さない)
 - 偽リンクを試す: open -g "betterauthmulti:///?state=zzz&code=$(date +%s)"(code は毎回変える。同じ code は 2 回目から無視される。-g がないと open が前に出す)
 - 署名付きなら、ビルドし直しても Keychain の許可は聞かれない(実機で、署名付きで 2 回ビルドして確認)。署名なしのバイナリ(tauri dev など)は、聞かれる。「常に許可」を選ぶ
 
 ## 既知の注意
+- tauri dev はビルドのたびに Keychain を聞かれる(署名なし)。ログインと退会の確認は、署名付きの .app で
 - Web の /api/auth/expo-authorization-proxy の open redirect(モバイルと共通の未対応)
 - 引き換えが失敗すると、そのリンクは使い切りで、再試行できない(もう一度リンクを頼む。設計どおり)
 - リリースビルドは、診断を何も出さない(段階 6 で見る)

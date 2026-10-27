@@ -37,7 +37,7 @@ const SEEN_MAX: usize = 5;
 
 pub struct AuthState {
     /// pending の「読む → 変える → 書く」が、同時に走らないようにする。
-    pending_lock: Mutex<()>,
+    pub(crate) pending_lock: Mutex<()>,
     /// セッションの「保存」と「消す」が、同時に走らないようにする。古いセッションの失敗で、新しく保存した
     /// セッションを消してしまわないよう、消すときは、この錠の中で「今あるのが、失敗した時に使ったものと
     /// 同じか」を確かめる(profile.rs の `end_session`)。

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
 import {
+  deleteAccount,
   isSignedIn,
   loadProfile,
   requestSignInLink,
@@ -14,6 +15,13 @@ import {
   screenAfterRefresh,
   signOutFailedMessage,
 } from "./lib/auth-outcomes";
+import {
+  canDelete,
+  deletedMessage,
+  deleteFailedMessage,
+  failedBeforeAfter,
+  sessionEndedMessageFor,
+} from "./lib/delete-account";
 import {
   draftsAfterLoad,
   hasChanges,
@@ -45,6 +53,12 @@ function App() {
   const [saveNotice, setSaveNotice] = useState("");
   // The profile is shown first; the edit form opens only after the "編集" button.
   const [editing, setEditing] = useState(false);
+  // The withdrawal form: opened by the "退会" button, hidden while the profile is edited.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [confirmEmail, setConfirmEmail] = useState("");
+  const [deleteMessage, setDeleteMessage] = useState("");
+  // A deletion failed in this form (a timeout, say): the web app may have finished it anyway.
+  const deleteFailedBefore = useRef(false);
   // Bumped to read the profile again (a new sign-in while signed in, or the retry button).
   const [reloadKey, setReloadKey] = useState(0);
   // State is not updated until the next render, so a double click would slip past `busy`.
@@ -72,6 +86,17 @@ function App() {
     setNameDraft("");
     setBioDraft("");
     setEditing(false);
+    setDeleteOpen(false);
+    setConfirmEmail("");
+    setDeleteMessage("");
+    deleteFailedBefore.current = false;
+  }
+
+  function closeDeleteForm() {
+    setDeleteOpen(false);
+    setConfirmEmail("");
+    setDeleteMessage("");
+    deleteFailedBefore.current = false;
   }
 
   // Rust trades the mail link for a session, remembers how it went, and nudges the screen with an
@@ -196,6 +221,7 @@ function App() {
     setNameDraft(profile.name);
     setBioDraft(profile.bio ?? "");
     setSaveNotice("");
+    closeDeleteForm();
     setEditing(true);
   }
 
@@ -244,6 +270,30 @@ function App() {
       if (result.kind === "saved" || result.kind === "nothing-to-save") setEditing(false);
     });
 
+  const withdraw = () =>
+    guarded(async () => {
+      if (!canDelete(confirmEmail, false)) return;
+      const started = generation.current;
+      setDeleteMessage("");
+      const result = await deleteAccount(confirmEmail);
+      // Another account signed in while this ran: the answer is for the previous user.
+      if (!isSameGeneration(started, generation.current)) return;
+      if (result.kind === "deleted") {
+        clearProfileState();
+        setStatus("signed-out");
+        setMessage(deletedMessage);
+      } else if (result.kind === "session-ended") {
+        // Read before `clearProfileState`, which forgets it.
+        const failedBefore = deleteFailedBefore.current;
+        clearProfileState();
+        setStatus("signed-out");
+        setMessage(sessionEndedMessageFor(failedBefore, sessionEndedMessage));
+      } else {
+        deleteFailedBefore.current = failedBeforeAfter(deleteFailedBefore.current, result);
+        setDeleteMessage(deleteFailedMessage(result));
+      }
+    });
+
   const logout = () =>
     guarded(async () => {
       setMessage("");
@@ -278,9 +328,49 @@ function App() {
                     : profile.bio}
               </dd>
             </dl>
-            <button type="button" disabled={busy} onClick={startEditing}>
-              編集
-            </button>
+            <div className="row">
+              <button type="button" disabled={busy} onClick={startEditing}>
+                編集
+              </button>
+            </div>
+            {!deleteOpen ? (
+              <button type="button" className="danger" disabled={busy} onClick={() => setDeleteOpen(true)}>
+                退会
+              </button>
+            ) : (
+              <form
+                className="column danger-box"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void withdraw();
+                }}
+              >
+                <h2>退会</h2>
+                <p>アカウントとデータを削除します。元に戻せません。確認のため、このアカウントのメールアドレスを入力してください。</p>
+                <input
+                  type="email"
+                  value={confirmEmail}
+                  onChange={(e) => {
+                    setConfirmEmail(e.currentTarget.value);
+                    setDeleteMessage("");
+                  }}
+                  placeholder="メールアドレス"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  disabled={busy}
+                />
+                <div className="row">
+                  <button type="submit" className="danger" disabled={!canDelete(confirmEmail, busy)}>
+                    {busy ? "退会中…" : "退会する"}
+                  </button>
+                  <button type="button" disabled={busy} onClick={closeDeleteForm}>
+                    キャンセル
+                  </button>
+                </div>
+                <p>{deleteMessage}</p>
+              </form>
+            )}
           </div>
         )}
         {profile && editing && (
