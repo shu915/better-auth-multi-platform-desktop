@@ -1,12 +1,16 @@
 pub mod api_parse;
 pub mod auth;
 pub mod config;
+pub mod profile;
 pub mod profile_rules;
 mod secret;
 pub mod session_cookie;
 pub mod sign_in_rules;
+#[cfg(test)]
+mod test_support;
 
 use auth::{AcceptOutcome, AuthState, RequestOutcome, SignOutOutcome};
+use profile::{LoadOutcome, SaveInput, SaveOutcome};
 use secret::KeychainStore;
 use sign_in_rules::{LinkVerdict, judge_link};
 use tauri::{Emitter, Manager};
@@ -47,6 +51,46 @@ fn session_status() -> bool {
 #[tauri::command]
 fn take_auth_outcome(state: tauri::State<'_, AuthState>) -> Option<AcceptOutcome> {
     state.take_outcome()
+}
+
+/// プロフィール(名前、メール、bio)を読む。セッションが無効なら、この Mac のセッションを消す。
+#[tauri::command]
+async fn load_profile(state: tauri::State<'_, AuthState>) -> Result<LoadOutcome, String> {
+    let outcome = match (config::web_url(), config::api_url()) {
+        (Ok(web), Ok(api)) => profile::load_profile(&state, &KeychainStore, &web, &api).await,
+        _ => LoadOutcome::Failed,
+    };
+    Ok(outcome)
+}
+
+/// 変わったものだけを保存する。画面は、今保存されている値と、編集中の値を渡す。
+#[tauri::command]
+async fn save_profile(
+    saved_name: String,
+    name_draft: String,
+    saved_bio: String,
+    bio_draft: String,
+    state: tauri::State<'_, AuthState>,
+) -> Result<SaveOutcome, String> {
+    let input = SaveInput {
+        saved_name: &saved_name,
+        name_draft: &name_draft,
+        saved_bio: &saved_bio,
+        bio_draft: &bio_draft,
+    };
+    let outcome = match (config::web_url(), config::api_url()) {
+        (Ok(web), Ok(api)) => {
+            profile::save_profile(&state, &KeychainStore, &web, &api, &input).await
+        }
+        // 接続先の設定の誤りは、どの項目の失敗でもない。
+        _ => SaveOutcome::Failed {
+            field: None,
+            refused: false,
+            refusal: None,
+            name_saved: None,
+        },
+    };
+    Ok(outcome)
 }
 
 /// ログアウト。この Mac のセッションは必ず消す。
@@ -127,6 +171,8 @@ pub fn run() {
             request_sign_in_link,
             session_status,
             take_auth_outcome,
+            load_profile,
+            save_profile,
             sign_out
         ])
         .run(tauri::generate_context!())

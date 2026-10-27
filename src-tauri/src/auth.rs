@@ -38,6 +38,10 @@ const SEEN_MAX: usize = 5;
 pub struct AuthState {
     /// pending の「読む → 変える → 書く」が、同時に走らないようにする。
     pending_lock: Mutex<()>,
+    /// セッションの「保存」と「消す」が、同時に走らないようにする。古いセッションの失敗で、新しく保存した
+    /// セッションを消してしまわないよう、消すときは、この錠の中で「今あるのが、失敗した時に使ったものと
+    /// 同じか」を確かめる(profile.rs の `end_session`)。
+    pub(crate) session_lock: Mutex<()>,
     seen: StdMutex<Vec<String>>,
     /// 最後に処理したリンクの結果。画面は、これを Rust のコマンドで取りに行く(イベントは「何か起きた」
     /// という合図だけ)。起動時のリンクは、画面が準備できる前に処理が終わることがあるので、画面が
@@ -49,6 +53,7 @@ impl AuthState {
     pub fn new() -> Self {
         AuthState {
             pending_lock: Mutex::new(()),
+            session_lock: Mutex::new(()),
             seen: StdMutex::new(Vec::new()),
             last_outcome: StdMutex::new(None),
         }
@@ -110,7 +115,7 @@ fn origin() -> String {
     format!("{APP_SCHEME}://")
 }
 
-fn client() -> Result<reqwest::Client, &'static str> {
+pub(crate) fn client() -> Result<reqwest::Client, &'static str> {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
         // 応答がリダイレクトでも追わない(セッションを載せたまま別の場所へ行かない)。
@@ -144,7 +149,7 @@ fn failure_reason(error: &reqwest::Error) -> &'static str {
 }
 
 /// 本文を、上限までだけ読む。上限を超えたり、途中で切れたりしたら `None`。
-async fn read_limited(mut res: reqwest::Response) -> Option<Vec<u8>> {
+pub(crate) async fn read_limited(mut res: reqwest::Response) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     loop {
         match res.chunk().await {
@@ -343,7 +348,11 @@ pub async fn accept_sign_in_link(
     let Some(session) = exchange_code(base, &code, &pending.verifier).await else {
         return accept_failed("exchange refused");
     };
-    match store.save(Slot::Session, &session.pair()) {
+    let saved = {
+        let _guard = auth.session_lock.lock().await;
+        store.save(Slot::Session, &session.pair())
+    };
+    match saved {
         Ok(()) => AcceptOutcome::Stored,
         Err(error) => {
             debug_log(&format!("saving the session failed: {error:?}"));
@@ -425,7 +434,11 @@ pub async fn sign_out(auth: &AuthState, store: &dyn Store, base: &str) -> SignOu
             debug_log(&format!("clearing pending failed: {error:?}"));
         }
     }
-    match store.delete(Slot::Session) {
+    let deleted = {
+        let _guard = auth.session_lock.lock().await;
+        store.delete(Slot::Session)
+    };
+    match deleted {
         Ok(()) => SignOutOutcome::SignedOut { server_notified },
         Err(_) => SignOutOutcome::Failed {
             reason: "storage failed".to_string(),
@@ -451,75 +464,9 @@ mod tests {
     use super::*;
     use crate::secret::testing::MemoryStore;
     use crate::sign_in_rules::PENDING_MAX_AGE_MS;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::Arc;
+    use crate::test_support::{body_of, dead_base, header_of, run, serve};
 
     const VERIFIER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 43 文字
-
-    /// 決まった応答を順に返す、ローカルの偽の Web。受け取った要求(ヘッダーと本文)を溜める。
-    struct Mock {
-        base: String,
-        requests: Arc<StdMutex<Vec<String>>>,
-    }
-
-    fn serve(responses: Vec<(u16, &'static str)>) -> Mock {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(StdMutex::new(Vec::new()));
-        let log = Arc::clone(&requests);
-        std::thread::spawn(move || {
-            for (status, body) in responses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 1024];
-                let (head_end, content_length) = loop {
-                    let n = stream.read(&mut chunk).unwrap_or(0);
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
-                        let len = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse::<usize>().ok())
-                            .unwrap_or(0);
-                        break (i + 4, len);
-                    }
-                    if n == 0 {
-                        break (buf.len(), 0);
-                    }
-                };
-                while buf.len() < head_end + content_length {
-                    let n = stream.read(&mut chunk).unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                log.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&buf).to_string());
-                let reply = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(reply.as_bytes());
-            }
-        });
-        Mock { base, requests }
-    }
-
-    /// 何も待ち受けていない接続先(接続が拒否される)。
-    fn dead_base() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://{}", listener.local_addr().unwrap())
-    }
-
-    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
-        tauri::async_runtime::block_on(future)
-    }
 
     fn pending_list(store: &MemoryStore) -> Vec<Pending> {
         parse_pending_list(store.load(Slot::Pending).unwrap().as_deref())
@@ -534,18 +481,6 @@ mod tests {
         store
             .save(Slot::Pending, &serde_json::to_string(&list).unwrap())
             .unwrap();
-    }
-
-    fn body_of(request: &str) -> serde_json::Value {
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-        serde_json::from_str(body).unwrap()
-    }
-
-    fn header_of(request: &str, name: &str) -> Option<String> {
-        request.lines().find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.eq_ignore_ascii_case(name).then(|| v.trim().to_string())
-        })
     }
 
     const SESSION_JSON: &str =

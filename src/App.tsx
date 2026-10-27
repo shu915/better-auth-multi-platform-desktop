@@ -1,12 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { isSignedIn, requestSignInLink, signOut, takeLinkResult } from "./lib/auth";
+import { isSignedIn, loadProfile, requestSignInLink, signOut, takeLinkResult } from "./lib/auth";
 import {
   requestMessage,
   screenAfterRefresh,
   signOutFailedMessage,
 } from "./lib/auth-outcomes";
+import {
+  bioFailedMessage,
+  profileFailedMessage,
+  sessionEndedMessage,
+} from "./lib/profile-outcomes";
+
+type Profile = { name: string; email: string; bio: string | null };
 
 type Status = "loading" | "signed-out" | "signed-in";
 
@@ -15,6 +22,10 @@ function App() {
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [profileMessage, setProfileMessage] = useState("");
+  // Bumped to read the profile again (a new sign-in while signed in, or the retry button).
+  const [reloadKey, setReloadKey] = useState(0);
   // State is not updated until the next render, so a double click would slip past `busy`.
   const running = useRef(false);
   // Which refresh is the latest. Two can be in flight (the first on start, one per nudge), and the
@@ -43,7 +54,19 @@ function App() {
       // state only from the latest run.
       if (screen.message !== null) setMessage(screen.message);
       if (run === latestRefresh.current) {
+        if (!screen.signedIn) {
+          // Whoever was shown is no longer signed in: their profile must not stay on the screen.
+          setProfile(null);
+          setProfileMessage("");
+        }
         setStatus(screen.signedIn ? "signed-in" : "signed-out");
+      }
+      // A new sign-in while already signed in may be another user's: drop what is shown and read the
+      // profile again (the effect below runs for `status` changes only, and `status` has not changed).
+      if (result?.kind === "stored") {
+        setProfile(null);
+        setProfileMessage("");
+        setReloadKey((key) => key + 1);
       }
     }
 
@@ -60,6 +83,30 @@ function App() {
       unlisten?.();
     };
   }, []);
+
+  // Once signed in, read the profile through Rust. If the web app says the session is no longer
+  // valid, Rust has already forgotten it, and the screen goes back to the sign-in form.
+  useEffect(() => {
+    if (status !== "signed-in") return;
+    let cancelled = false;
+    void loadProfile().then((result) => {
+      if (cancelled) return;
+      if (result.kind === "loaded") {
+        setProfile({ name: result.name, email: result.email, bio: result.bio });
+        setProfileMessage(result.bio === null ? bioFailedMessage : "");
+      } else if (result.kind === "session-ended") {
+        setProfile(null);
+        setProfileMessage("");
+        setStatus("signed-out");
+        setMessage(sessionEndedMessage);
+      } else {
+        setProfileMessage(profileFailedMessage);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [status, reloadKey]);
 
   async function guarded(action: () => Promise<void>) {
     if (running.current) return;
@@ -84,8 +131,11 @@ function App() {
     guarded(async () => {
       setMessage("");
       const result = await signOut();
-      if (result.kind === "signed-out") setStatus("signed-out");
-      else setMessage(signOutFailedMessage);
+      if (result.kind === "signed-out") {
+        setProfile(null);
+        setProfileMessage("");
+        setStatus("signed-out");
+      } else setMessage(signOutFailedMessage);
     });
 
   if (status === "loading") {
@@ -96,7 +146,35 @@ function App() {
     return (
       <main className="container">
         <h1>ログイン中</h1>
+        {profile && (
+          <dl>
+            <dt>名前</dt>
+            <dd>{profile.name === "" ? "(未設定)" : profile.name}</dd>
+            <dt>メール</dt>
+            <dd>{profile.email}</dd>
+            <dt>bio</dt>
+            <dd>
+              {profile.bio === null
+                ? "(読み込めませんでした)"
+                : profile.bio === ""
+                  ? "(未設定)"
+                  : profile.bio}
+            </dd>
+          </dl>
+        )}
+        <p>{profileMessage}</p>
         <div className="row">
+          {profile === null && profileMessage !== "" && (
+            <button
+              type="button"
+              onClick={() => {
+                setProfileMessage("");
+                setReloadKey((key) => key + 1);
+              }}
+            >
+              再読み込み
+            </button>
+          )}
           <button type="button" disabled={busy} onClick={() => void logout()}>
             ログアウト
           </button>

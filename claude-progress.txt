@@ -25,7 +25,7 @@ claude-progress.txt (desktop)
 - 識別子 com.shu915.authpractice.desktop、アプリ名 Auth Practice
 - Web の口は /api/mobile/* をそのまま使う(名前の一般化は、後で考える)
 - 秘密は Rust と Keychain だけ。JS には、Keychain を触るコマンドも、deep link の権限も渡さない。JS の権限は event の購読(listen、unlisten)だけ
-- Web の URL は、ビルド時に AUTH_WEB_URL で埋め込む。デバッグは http://localhost:3000、リリースは https 必須
+- Web の URL は AUTH_WEB_URL、Go の URL は AUTH_API_URL で、ビルド時に埋め込む。デバッグの既定は http://localhost:3000 と http://localhost:8080、リリースは https 必須(AUTH_WEB_URL=… AUTH_API_URL=… npm run tauri build)
 
 ## .app を試すとき(deep link は、ビルドした .app を /Applications に入れたときだけ届く)
 - ビルド: npm run tauri build -- --debug --bundles app(デバッグビルドは localhost に繋げる。リリースは https 必須)
