@@ -1,67 +1,97 @@
-import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
+import { isSignedIn, requestSignInLink, signOut } from "./lib/auth";
+import {
+  requestMessage,
+  signOutFailedMessage,
+} from "./lib/auth-outcomes";
 
-// 段階 1 の練習用の画面。Rust のコマンドを呼んで Keychain に保存・確認・削除する。
-// 保存した値は読み出さない(Rust は「あるか」だけを返す)。
-const NAME = "practice";
+type Status = "loading" | "signed-out" | "signed-in";
 
 function App() {
-  const [value, setValue] = useState("");
+  const [status, setStatus] = useState<Status>("loading");
+  const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  // State is not updated until the next render, so a double click would slip past `busy`.
+  const running = useRef(false);
 
-  async function run(action: () => Promise<string>) {
+  useEffect(() => {
+    let cancelled = false;
+    void isSignedIn().then((signedIn) => {
+      if (!cancelled) setStatus(signedIn ? "signed-in" : "signed-out");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function guarded(action: () => Promise<void>) {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
     try {
-      setMessage(await action());
-    } catch (e) {
-      setMessage(`失敗: ${String(e)}`);
+      await action();
+    } finally {
+      running.current = false;
+      setBusy(false);
     }
   }
 
-  const save = () =>
-    run(async () => {
-      await invoke("secret_save", { name: NAME, value });
-      setValue("");
-      return "Keychain に保存しました";
+  const sendLink = () =>
+    guarded(async () => {
+      setMessage("");
+      const result = await requestSignInLink(email);
+      setMessage(requestMessage(result));
     });
 
-  const check = () =>
-    run(async () => {
-      const exists = await invoke<boolean>("secret_exists", { name: NAME });
-      return exists ? "値があります" : "値はありません";
+  const logout = () =>
+    guarded(async () => {
+      setMessage("");
+      const result = await signOut();
+      if (result.kind === "signed-out") setStatus("signed-out");
+      else setMessage(signOutFailedMessage);
     });
 
-  const remove = () =>
-    run(async () => {
-      await invoke("secret_delete", { name: NAME });
-      return "削除しました";
-    });
+  if (status === "loading") {
+    return <main className="container" />;
+  }
+
+  if (status === "signed-in") {
+    return (
+      <main className="container">
+        <h1>ログイン中</h1>
+        <div className="row">
+          <button type="button" disabled={busy} onClick={() => void logout()}>
+            ログアウト
+          </button>
+        </div>
+        <p>{message}</p>
+      </main>
+    );
+  }
 
   return (
     <main className="container">
-      <h1>Keychain の練習</h1>
+      <h1>ログイン</h1>
       <form
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          void save();
+          void sendLink();
         }}
       >
         <input
-          value={value}
-          onChange={(e) => setValue(e.currentTarget.value)}
-          placeholder="保存する値"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.currentTarget.value)}
+          placeholder="メールアドレス"
+          autoComplete="email"
         />
-        <button type="submit">保存</button>
+        <button type="submit" disabled={busy || email.trim() === ""}>
+          ログインのリンクを送る
+        </button>
       </form>
-      <div className="row">
-        <button type="button" onClick={() => void check()}>
-          あるか確認
-        </button>
-        <button type="button" onClick={() => void remove()}>
-          削除
-        </button>
-      </div>
       <p>{message}</p>
     </main>
   );
