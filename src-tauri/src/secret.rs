@@ -1,7 +1,9 @@
-//! Keychain への保存。秘密は Rust の中だけに置き、読み出しの結果を JS には返さない。
+//! Keychain への保存。秘密は Rust の中だけに置き、JS には値を返さない。
 //!
-//! 判断(名前と値の検証)は純粋な関数に分けて、`cargo test` で試す。Keychain 本体を触る部分は
-//! OS に依存するので、テストでは触らない。
+//! 保存先は `Slot`(決まった名前だけ)。JS が名前を指定して読み書きできるのは練習用の 1 つだけで、
+//! セッションと pending は Rust の内部だけが触る。判断(名前と値の検証)は純粋な関数に分けて、
+//! `cargo test` で試す。Keychain 本体を触る部分は OS に依存するので、テストでは触らない
+//! (テストでは `Store` を、メモリ上の偽物に差し替える)。
 
 use keyring::Entry;
 
@@ -11,8 +13,34 @@ const SERVICE: &str = "com.shu915.authpractice.desktop";
 /// 値の最大バイト数。大きすぎる値を Keychain に入れさせない。
 const MAX_VALUE_BYTES: usize = 4096;
 
-/// JS から指定できる項目名。ここにない名前は拒否する(任意の名前で Keychain を読み書きさせない)。
-const ALLOWED_NAMES: &[&str] = &["practice"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// 練習用。JS のコマンドから読み書きできる唯一の項目。
+    Practice,
+    /// ログイン中のセッション(`名前=値`)。Rust の内部だけ。
+    Session,
+    /// 自分が始めたログインの一覧(JSON)。Rust の内部だけ。
+    Pending,
+}
+
+impl Slot {
+    /// Keychain の「アカウント名」。
+    fn account(self) -> &'static str {
+        match self {
+            Slot::Practice => "practice",
+            Slot::Session => "session",
+            Slot::Pending => "pending_sign_in",
+        }
+    }
+
+    /// JS が指定した名前を、JS に開けてよい項目に直す。ここにない名前(セッションなど)は拒否する。
+    pub fn from_js(name: &str) -> Result<Slot, SecretError> {
+        match name {
+            "practice" => Ok(Slot::Practice),
+            _ => Err(SecretError::UnknownName),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum SecretError {
@@ -34,15 +62,6 @@ impl std::fmt::Display for SecretError {
     }
 }
 
-/// 項目名が許可リストにあるか。
-pub fn check_name(name: &str) -> Result<(), SecretError> {
-    if ALLOWED_NAMES.contains(&name) {
-        Ok(())
-    } else {
-        Err(SecretError::UnknownName)
-    }
-}
-
 /// 保存する値が空でなく、大きすぎないか。
 pub fn check_value(value: &str) -> Result<(), SecretError> {
     if value.is_empty() {
@@ -54,50 +73,97 @@ pub fn check_value(value: &str) -> Result<(), SecretError> {
     Ok(())
 }
 
-fn entry(name: &str) -> Result<Entry, SecretError> {
-    check_name(name)?;
-    Entry::new(SERVICE, name).map_err(|e| SecretError::Keychain(e.to_string()))
+/// 秘密の置き場。本物は Keychain、テストではメモリ上の偽物。
+pub trait Store: Send + Sync {
+    fn load(&self, slot: Slot) -> Result<Option<String>, SecretError>;
+    fn save(&self, slot: Slot, value: &str) -> Result<(), SecretError>;
+    /// 消す。もともとなくても成功にする(何度やっても同じ結果になる)。
+    fn delete(&self, slot: Slot) -> Result<(), SecretError>;
 }
 
-pub fn save(name: &str, value: &str) -> Result<(), SecretError> {
-    check_value(value)?;
-    entry(name)?
-        .set_password(value)
-        .map_err(|e| SecretError::Keychain(e.to_string()))
+pub struct KeychainStore;
+
+fn entry(slot: Slot) -> Result<Entry, SecretError> {
+    Entry::new(SERVICE, slot.account()).map_err(|e| SecretError::Keychain(e.to_string()))
 }
 
-/// 値があるかどうかだけを返す。値そのものは返さない。
-pub fn exists(name: &str) -> Result<bool, SecretError> {
-    match entry(name)?.get_password() {
-        Ok(_) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(SecretError::Keychain(e.to_string())),
+impl Store for KeychainStore {
+    fn load(&self, slot: Slot) -> Result<Option<String>, SecretError> {
+        match entry(slot)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(SecretError::Keychain(e.to_string())),
+        }
+    }
+
+    fn save(&self, slot: Slot, value: &str) -> Result<(), SecretError> {
+        check_value(value)?;
+        entry(slot)?
+            .set_password(value)
+            .map_err(|e| SecretError::Keychain(e.to_string()))
+    }
+
+    fn delete(&self, slot: Slot) -> Result<(), SecretError> {
+        match entry(slot)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(SecretError::Keychain(e.to_string())),
+        }
     }
 }
 
-/// 消す。もともとなくても成功にする(何度やっても同じ結果になる)。
-pub fn delete(name: &str) -> Result<(), SecretError> {
-    match entry(name)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(SecretError::Keychain(e.to_string())),
+#[cfg(test)]
+pub mod testing {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// メモリ上の偽の置き場。
+    #[derive(Default)]
+    pub struct MemoryStore(Mutex<HashMap<&'static str, String>>);
+
+    impl Store for MemoryStore {
+        fn load(&self, slot: Slot) -> Result<Option<String>, SecretError> {
+            Ok(self.0.lock().unwrap().get(slot.account()).cloned())
+        }
+        fn save(&self, slot: Slot, value: &str) -> Result<(), SecretError> {
+            check_value(value)?;
+            self.0
+                .lock()
+                .unwrap()
+                .insert(slot.account(), value.to_string());
+            Ok(())
+        }
+        fn delete(&self, slot: Slot) -> Result<(), SecretError> {
+            self.0.lock().unwrap().remove(slot.account());
+            Ok(())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::testing::MemoryStore;
     use super::*;
 
     #[test]
-    fn known_name_is_accepted() {
-        assert_eq!(check_name("practice"), Ok(()));
+    fn js_can_open_only_the_practice_slot() {
+        assert_eq!(Slot::from_js("practice"), Ok(Slot::Practice));
+        for name in [
+            "session",
+            "pending_sign_in",
+            "",
+            "practice ",
+            "../practice",
+            "Practice",
+        ] {
+            assert_eq!(Slot::from_js(name), Err(SecretError::UnknownName), "{name}");
+        }
     }
 
     #[test]
-    fn unknown_name_is_rejected() {
-        assert_eq!(check_name("session"), Err(SecretError::UnknownName));
-        assert_eq!(check_name(""), Err(SecretError::UnknownName));
-        assert_eq!(check_name("practice "), Err(SecretError::UnknownName));
-        assert_eq!(check_name("../practice"), Err(SecretError::UnknownName));
+    fn slots_use_different_accounts() {
+        let accounts = [Slot::Practice, Slot::Session, Slot::Pending].map(Slot::account);
+        assert_eq!(accounts, ["practice", "session", "pending_sign_in"]);
     }
 
     #[test]
@@ -131,5 +197,17 @@ mod tests {
     fn keychain_error_message_hides_details() {
         let e = SecretError::Keychain("secret-detail".to_string());
         assert_eq!(e.to_string(), "keychain error");
+    }
+
+    #[test]
+    fn the_memory_store_saves_loads_and_deletes() {
+        let store = MemoryStore::default();
+        assert_eq!(store.load(Slot::Session), Ok(None));
+        store.save(Slot::Session, "v").unwrap();
+        assert_eq!(store.load(Slot::Session), Ok(Some("v".to_string())));
+        assert_eq!(store.load(Slot::Pending), Ok(None));
+        store.delete(Slot::Session).unwrap();
+        store.delete(Slot::Session).unwrap(); // 2 回目も成功(何度やっても同じ)
+        assert_eq!(store.load(Slot::Session), Ok(None));
     }
 }

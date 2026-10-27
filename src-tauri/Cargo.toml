@@ -26,6 +26,8 @@ keyring = "4.2.0"
 sha2 = "0.11.1"
 base64 = "0.23.1"
 url = "2.5.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+getrandom = "0.4.3"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
