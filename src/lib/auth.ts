@@ -9,6 +9,7 @@ import {
   type RequestResult,
   type SignOutResult,
 } from './auth-outcomes';
+import { parseDeleteResult, type DeleteResult } from './delete-account';
 import { parseSaveResult, type SaveResult } from './profile-edit';
 import { parseLoadResult, type LoadResult } from './profile-outcomes';
 
@@ -73,5 +74,15 @@ export async function saveProfile(input: {
     return parseSaveResult(await invoke<unknown>('save_profile', input));
   } catch {
     return parseSaveResult(null);
+  }
+}
+
+// Deletes the account through Rust (the web app does the deleting). The typed email is only passed on;
+// the web app compares it with the account's. Rust forgets the session itself when it is gone.
+export async function deleteAccount(confirmEmail: string): Promise<DeleteResult> {
+  try {
+    return parseDeleteResult(await invoke<unknown>('delete_account', { confirmEmail }));
+  } catch {
+    return { kind: 'failed' };
   }
 }

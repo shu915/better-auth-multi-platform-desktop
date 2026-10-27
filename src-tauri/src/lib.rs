@@ -1,3 +1,4 @@
+pub mod account;
 pub mod api_parse;
 pub mod auth;
 pub mod config;
@@ -9,6 +10,7 @@ pub mod sign_in_rules;
 #[cfg(test)]
 mod test_support;
 
+use account::DeleteOutcome;
 use auth::{AcceptOutcome, AuthState, RequestOutcome, SignOutOutcome};
 use profile::{LoadOutcome, SaveInput, SaveOutcome};
 use secret::KeychainStore;
@@ -93,6 +95,19 @@ async fn save_profile(
     Ok(outcome)
 }
 
+/// 退会する。確認のメールは、利用者が打ったもの(Web がセッションのメールと突き合わせる)。
+#[tauri::command]
+async fn delete_account(
+    confirm_email: String,
+    state: tauri::State<'_, AuthState>,
+) -> Result<DeleteOutcome, String> {
+    let outcome = match config::web_url() {
+        Ok(web) => account::delete_account(&state, &KeychainStore, &web, &confirm_email).await,
+        Err(_) => DeleteOutcome::Failed,
+    };
+    Ok(outcome)
+}
+
 /// ログアウト。この Mac のセッションは必ず消す。
 #[tauri::command]
 async fn sign_out(state: tauri::State<'_, AuthState>) -> Result<SignOutOutcome, String> {
@@ -173,6 +188,7 @@ pub fn run() {
             take_auth_outcome,
             load_profile,
             save_profile,
+            delete_account,
             sign_out
         ])
         .run(tauri::generate_context!())

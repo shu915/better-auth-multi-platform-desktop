@@ -29,21 +29,21 @@ use crate::session_cookie::{SessionCookie, parse_session_cookie};
 /// 壊れている、途中で切れた)は `None`。JSON の `null`(`Some(Value::Null)`)とは、区別する。
 /// 区別しないと、壊れた 200 の答え(プロキシの HTML など)を「セッションがない」と取り違えて、有効な
 /// セッションを消してしまう。
-struct Reply {
-    status: u16,
-    body: Option<Value>,
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) body: Option<Value>,
 }
 
 impl Reply {
     /// 読めた JSON(`null` を除く)。
-    fn json(&self) -> Option<&Value> {
+    pub(crate) fn json(&self) -> Option<&Value> {
         self.body.as_ref().filter(|body| !body.is_null())
     }
 }
 
 /// 要求を送って、答えを読む。答えがなければ(接続できない、タイムアウト)`None`。本文が読めなくても、
 /// ステータスは使う。
-async fn call(request: reqwest::RequestBuilder) -> Option<Reply> {
+pub(crate) async fn call(request: reqwest::RequestBuilder) -> Option<Reply> {
     let res = request.send().await.ok()?;
     let status = res.status().as_u16();
     let body = read_limited(res)
@@ -52,7 +52,7 @@ async fn call(request: reqwest::RequestBuilder) -> Option<Reply> {
     Some(Reply { status, body })
 }
 
-fn read_session(store: &dyn Store) -> Option<SessionCookie> {
+pub(crate) fn read_session(store: &dyn Store) -> Option<SessionCookie> {
     store
         .load(Slot::Session)
         .ok()
@@ -68,7 +68,7 @@ fn read_session(store: &dyn Store) -> Option<SessionCookie> {
 /// 失敗の最中に、メールのリンクの引き換えが終わって、新しいセッションに替わっていたら、それを消さない
 /// (ログインに成功した直後に、ログアウトされないように)。確認と削除は、錠の中でまとめて行う。
 /// 消した(またはもともとなかった)ときは `true`、新しいセッションに替わっていて消さなかったときは `false`。
-async fn end_session(auth: &AuthState, store: &dyn Store, used: &SessionCookie) -> bool {
+pub(crate) async fn end_session(auth: &AuthState, store: &dyn Store, used: &SessionCookie) -> bool {
     let _guard = auth.session_lock.lock().await;
     match read_session(store) {
         Some(current) if &current != used => false,
