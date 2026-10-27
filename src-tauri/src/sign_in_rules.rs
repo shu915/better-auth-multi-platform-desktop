@@ -22,11 +22,42 @@ pub const MAX_PENDING: usize = 3;
 
 /// 自分が始めたログインの 1 件。`verifier` は PKCE の秘密で、Web には、そのハッシュ(challenge)しか
 /// 渡さない。リンクから `code` を盗まれても、`verifier` がなければ使えない。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub state: String,
     pub verifier: String,
     pub created_at: u64,
+}
+
+/// マジックリンクの宛先として受け付ける長さ(RFC 5321 のメールアドレスの最大 254)。
+const MAX_EMAIL_BYTES: usize = 254;
+
+/// 画面から来たメールアドレスを、Web に送る前に軽く確かめる。厳密な検証は Web の仕事で、ここは
+/// 空や極端に長い入力、制御文字を Web に送らないためだけ。前後の空白は取る。
+pub fn check_email(input: &str) -> Option<String> {
+    let email = input.trim();
+    let ok = !email.is_empty()
+        && email.len() <= MAX_EMAIL_BYTES
+        && email.contains('@')
+        && !email.chars().any(|c| c.is_control() || c.is_whitespace());
+    ok.then(|| email.to_string())
+}
+
+/// Web に渡す `callbackURL`。メールのリンクの検証後、Web がここへ戻す(`code` はそのとき付く)。
+/// `state` と `challenge` は、URL にそのまま載せられる文字(16 進と base64url)でできている。
+/// verifier は、ここには入れない。
+pub fn callback_url(state: &str, challenge: &str) -> String {
+    format!("{APP_SCHEME}:///?state={state}&cc={challenge}")
+}
+
+/// `{:?}` でログに出ても、verifier(PKCE の秘密)は出さない。
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("state", &self.state)
+            .field("created_at", &self.created_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// RFC 7636: verifier は、使える文字(英数字と `-._~`)の 43〜128 文字。ここでは 32 バイトの乱数を
@@ -202,6 +233,15 @@ pub fn judge_link(link: &str) -> LinkVerdict {
     LinkVerdict::Code { code, state }
 }
 
+/// リンクの `state`(1 つだけ付いているときだけ)。拒否したリンクの通知を、state ごとに 1 回に
+/// するために使う(同じリンクが 2 回届くことがある)。
+pub fn link_state(link: &str) -> Option<String> {
+    match param(&Url::parse(link).ok()?, "state") {
+        Param::One(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// 戻り先は、ちょうど `<スキーム>:///?state=…&code=…`(ホストなし、パスなし)。
 fn has_sign_in_link_shape(url: &Url) -> bool {
     url.scheme() == APP_SCHEME
@@ -226,7 +266,47 @@ mod tests {
         }
     }
 
+    // --- 宛先と callbackURL ---
+
+    #[test]
+    fn email_is_trimmed_and_checked_lightly() {
+        assert_eq!(
+            check_email("  a@example.com ").as_deref(),
+            Some("a@example.com")
+        );
+        for input in [
+            "",
+            "   ",
+            "no-at-sign",
+            "a b@example.com",
+            "a@exam\nple.com",
+            "a\u{0}@x",
+        ] {
+            assert_eq!(check_email(input), None, "{input:?}");
+        }
+        assert_eq!(check_email(&format!("{}@x.co", "a".repeat(250))), None);
+    }
+
+    #[test]
+    fn callback_url_carries_state_and_challenge_but_no_verifier() {
+        let url = callback_url("abc123", "chal-_x");
+        assert_eq!(url, "betterauthmulti:///?state=abc123&cc=chal-_x");
+        // 自分の judge_link が「ログインのリンク」として読める形(code を足せば Code になる)。
+        assert_eq!(
+            judge_link(&format!("{url}&code=c")),
+            LinkVerdict::Code {
+                code: "c".to_string(),
+                state: "abc123".to_string()
+            }
+        );
+    }
+
     // --- verifier / challenge ---
+
+    #[test]
+    fn pending_debug_output_hides_the_verifier() {
+        assert!(!format!("{:?}", pending("s", 1)).contains(V1));
+    }
 
     #[test]
     fn verifier_from_32_bytes_is_43_chars_and_valid() {
@@ -384,6 +464,22 @@ mod tests {
     }
 
     // --- リンクの判断 ---
+
+    #[test]
+    fn link_state_reads_a_single_state() {
+        assert_eq!(
+            link_state("betterauthmulti:///?state=s&x=1").as_deref(),
+            Some("s")
+        );
+        for link in [
+            "betterauthmulti:///",
+            "betterauthmulti:///?state=",
+            "betterauthmulti:///?state=a&state=b",
+            "junk",
+        ] {
+            assert_eq!(link_state(link), None, "{link}");
+        }
+    }
 
     fn code(c: &str, s: &str) -> LinkVerdict {
         LinkVerdict::Code {
