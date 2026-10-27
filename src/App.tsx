@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { listen } from "@tauri-apps/api/event";
-import { isSignedIn, requestSignInLink, signOut } from "./lib/auth";
+import { isSignedIn, requestSignInLink, signOut, takeLinkResult } from "./lib/auth";
 import {
-  linkMessage,
-  parseLinkResult,
   requestMessage,
+  screenAfterRefresh,
   signOutFailedMessage,
 } from "./lib/auth-outcomes";
 
@@ -18,35 +17,44 @@ function App() {
   const [busy, setBusy] = useState(false);
   // State is not updated until the next render, so a double click would slip past `busy`.
   const running = useRef(false);
+  // Which refresh is the latest. Two can be in flight (the first on start, one per nudge), and the
+  // answers of an older one must not overwrite the sign-in state set by a newer one.
+  const latestRefresh = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    void isSignedIn().then((signedIn) => {
-      if (!cancelled) setStatus(signedIn ? "signed-in" : "signed-out");
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // The mail link is opened in the browser, which hands it to the app; Rust trades it for a session
-  // and tells the screen how it went (src-tauri/src/lib.rs).
+  // Rust trades the mail link for a session, remembers how it went, and nudges the screen with an
+  // event. The screen asks Rust (the session, and the result of the link) instead of trusting what
+  // the event carries; and it asks once when it starts, because a link that launched the app can be
+  // handled before the screen is listening (src-tauri/src/lib.rs).
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    void listen<unknown>("auth-changed", (event) => {
-      const result = parseLinkResult(event.payload);
-      if (result === null) return;
-      if (result.kind === "stored") {
-        setMessage("");
-        setStatus("signed-in");
-      } else {
-        setMessage(linkMessage(result));
+
+    async function refresh() {
+      const run = ++latestRefresh.current;
+      // The result first, then the session: a link that was traded in between is then seen in the
+      // session, not missed (and `screenAfterRefresh` covers the other order).
+      const result = await takeLinkResult();
+      const signedIn = await isSignedIn();
+      // No check for an unmounted screen here: in development React mounts, unmounts and mounts
+      // again, and the first run may have taken the result (it is given out once). Setting state
+      // on a screen that has gone is harmless.
+      const screen = screenAfterRefresh(signedIn, result);
+      // The message of a result is shown whichever run took it (it is given out once); the sign-in
+      // state only from the latest run.
+      if (screen.message !== null) setMessage(screen.message);
+      if (run === latestRefresh.current) {
+        setStatus(screen.signedIn ? "signed-in" : "signed-out");
       }
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
+    }
+
+    // Listen first, then ask: a result that arrives in between is not lost.
+    void listen("auth-changed", () => void refresh())
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .finally(() => void refresh());
+
     return () => {
       cancelled = true;
       unlisten?.();

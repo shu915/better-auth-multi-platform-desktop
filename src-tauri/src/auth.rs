@@ -39,6 +39,10 @@ pub struct AuthState {
     /// pending の「読む → 変える → 書く」が、同時に走らないようにする。
     pending_lock: Mutex<()>,
     seen: StdMutex<Vec<String>>,
+    /// 最後に処理したリンクの結果。画面は、これを Rust のコマンドで取りに行く(イベントは「何か起きた」
+    /// という合図だけ)。起動時のリンクは、画面が準備できる前に処理が終わることがあるので、画面が
+    /// 後から取れるように、ここに残す。
+    last_outcome: StdMutex<Option<AcceptOutcome>>,
 }
 
 impl AuthState {
@@ -46,13 +50,36 @@ impl AuthState {
         AuthState {
             pending_lock: Mutex::new(()),
             seen: StdMutex::new(Vec::new()),
+            last_outcome: StdMutex::new(None),
         }
+    }
+
+    /// リンクの結果を残す(前のものは置き換える)。ただし、`Stored` と `Failed`(自分が頼んだリンクの
+    /// 結果)は、`Rejected`(頼んでいないリンク)では置き換えない。画面が取る前に、第三者のリンクが
+    /// 届いても、正規の結果の表示が消えないように。
+    pub fn set_outcome(&self, outcome: AcceptOutcome) {
+        if let Ok(mut last) = self.last_outcome.lock() {
+            let keeps = matches!(outcome, AcceptOutcome::Rejected { .. })
+                && matches!(
+                    *last,
+                    Some(AcceptOutcome::Stored | AcceptOutcome::Failed { .. })
+                );
+            if !keeps {
+                *last = Some(outcome);
+            }
+        }
+    }
+
+    /// 残っている結果を渡して、空にする(同じ結果を 2 回表示しない)。
+    pub fn take_outcome(&self) -> Option<AcceptOutcome> {
+        self.last_outcome.lock().ok()?.take()
     }
 
     /// 初めて見るなら `true`(覚える)。2 回目以降は `false`。
     fn first_time(&self, key: String) -> bool {
+        // 錠が壊れていたら、通さない側に倒す(同じリンクの二重処理より、取りこぼしのほうが安全)。
         let Ok(mut seen) = self.seen.lock() else {
-            return true;
+            return false;
         };
         if seen.contains(&key) {
             return false;
@@ -69,6 +96,12 @@ impl Default for AuthState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 拒否したリンクの state を覚えるときのキー。長い state で、覚えている件数を押し出されないよう、
+/// 長さに上限を付ける。
+fn refused_key(state: &str) -> String {
+    format!("refused:{}", state.chars().take(64).collect::<String>())
 }
 
 /// Web に `Origin` として見せる値。Web の `expo()` は `expo-origin` ヘッダーを Origin に置き換えるので、
@@ -89,7 +122,7 @@ fn client() -> Result<reqwest::Client, &'static str> {
 /// デバッグビルドだけ、原因の切り分けのために標準エラーに出す(リリースビルドでは何も出さない)。
 /// 出してよいのは、固定の種類名、HTTP ステータス、Keychain のエラーの種類だけ。秘密(verifier、
 /// code、セッションの値)は、決して渡さない。
-fn debug_log(message: &str) {
+pub(crate) fn debug_log(message: &str) {
     if cfg!(debug_assertions) {
         eprintln!("[auth] {message}");
     }
@@ -260,7 +293,7 @@ pub async fn accept_sign_in_link(
         LinkVerdict::Rejected(reason) => {
             // 拒否も 2 回届くことがある。state ごとに 1 回だけ知らせる。
             if let Some(state) = link_state(link)
-                && !auth.first_time(format!("refused:{state}"))
+                && !auth.first_time(refused_key(&state))
             {
                 return AcceptOutcome::Ignored;
             }
@@ -270,6 +303,10 @@ pub async fn accept_sign_in_link(
         }
         LinkVerdict::Code { code, state } => (code, state),
     };
+    // code を、state の確認より先に記録する。同じリンクの二重配信で、引き換えを 2 回走らせないため。
+    // 代わりに、適当な code で届いた他人のリンクの code も、記録に入る(件数は SEEN_MAX まで)。同じ
+    // code の正規のリンクは存在しない(code は Web が作る)ので、実害はない。ただし、同じ URL を
+    // 繰り返して試すときは、code を毎回変えること(2 回目からは `Ignored` で、何も出ない)。
     if !auth.first_time(code.clone()) {
         return AcceptOutcome::Ignored;
     }
@@ -366,7 +403,7 @@ pub enum SignOutOutcome {
     Failed { reason: String },
 }
 
-pub async fn sign_out(store: &dyn Store, base: &str) -> SignOutOutcome {
+pub async fn sign_out(auth: &AuthState, store: &dyn Store, base: &str) -> SignOutOutcome {
     let session = match store.load(Slot::Session) {
         Ok(raw) => raw.as_deref().and_then(parse_session_cookie),
         Err(_) => {
@@ -380,6 +417,14 @@ pub async fn sign_out(store: &dyn Store, base: &str) -> SignOutOutcome {
         Some(session) => notify_sign_out(base, session).await,
         None => false,
     };
+    // 頼んだまま届いていないメールのリンクで、ログアウトのあとに再びログインされないよう、
+    // pending も消す。消せなくても、セッションが消えれば、ログアウトとしては成功。
+    {
+        let _guard = auth.pending_lock.lock().await;
+        if let Err(error) = store.delete(Slot::Pending) {
+            debug_log(&format!("clearing pending failed: {error:?}"));
+        }
+    }
     match store.delete(Slot::Session) {
         Ok(()) => SignOutOutcome::SignedOut { server_notified },
         Err(_) => SignOutOutcome::Failed {
@@ -777,7 +822,7 @@ mod tests {
         sign_in(&store);
 
         assert_eq!(
-            run(sign_out(&store, &mock.base)),
+            run(sign_out(&AuthState::new(), &store, &mock.base)),
             SignOutOutcome::SignedOut {
                 server_notified: true
             }
@@ -797,7 +842,7 @@ mod tests {
         let store = MemoryStore::default();
         sign_in(&store);
         assert_eq!(
-            run(sign_out(&store, &dead_base())),
+            run(sign_out(&AuthState::new(), &store, &dead_base())),
             SignOutOutcome::SignedOut {
                 server_notified: false
             }
@@ -809,10 +854,87 @@ mod tests {
     fn signing_out_when_not_signed_in_sends_nothing() {
         let store = MemoryStore::default();
         assert_eq!(
-            run(sign_out(&store, &dead_base())),
+            run(sign_out(&AuthState::new(), &store, &dead_base())),
             SignOutOutcome::SignedOut {
                 server_notified: false
             }
+        );
+    }
+
+    #[test]
+    fn signing_out_also_forgets_a_mail_link_that_was_asked_for_but_not_used() {
+        let store = MemoryStore::default();
+        sign_in(&store);
+        open_request(&store, "st1");
+        run(sign_out(&AuthState::new(), &store, &dead_base()));
+        assert!(pending_list(&store).is_empty());
+    }
+
+    #[test]
+    fn the_last_outcome_is_kept_until_taken_and_taken_once() {
+        let auth = AuthState::new();
+        assert_eq!(auth.take_outcome(), None);
+        auth.set_outcome(AcceptOutcome::Rejected {
+            reason: "x".to_string(),
+        });
+        auth.set_outcome(AcceptOutcome::Stored); // 新しい結果が、前のものを置き換える
+        assert_eq!(auth.take_outcome(), Some(AcceptOutcome::Stored));
+        assert_eq!(auth.take_outcome(), None);
+    }
+
+    #[test]
+    fn a_link_we_did_not_ask_for_does_not_replace_the_result_of_one_we_did() {
+        let rejected = || AcceptOutcome::Rejected {
+            reason: "x".to_string(),
+        };
+        let failed = || AcceptOutcome::Failed {
+            reason: "exchange refused".to_string(),
+        };
+        for ours in [AcceptOutcome::Stored, failed()] {
+            let auth = AuthState::new();
+            auth.set_outcome(ours);
+            auth.set_outcome(rejected());
+            assert_ne!(auth.take_outcome(), Some(rejected()));
+        }
+        // 頼んでいないリンクどうしは、新しいほうに置き換わる。
+        let auth = AuthState::new();
+        auth.set_outcome(AcceptOutcome::Rejected {
+            reason: "first".to_string(),
+        });
+        auth.set_outcome(AcceptOutcome::Rejected {
+            reason: "second".to_string(),
+        });
+        assert_eq!(
+            auth.take_outcome(),
+            Some(AcceptOutcome::Rejected {
+                reason: "second".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn the_key_for_a_refused_link_has_a_length_limit() {
+        assert_eq!(refused_key("abc"), "refused:abc");
+        assert_eq!(refused_key(&"x".repeat(1000)).len(), "refused:".len() + 64);
+    }
+
+    #[test]
+    fn what_the_screen_is_told_holds_only_a_kind_and_a_fixed_reason() {
+        let json = |outcome: &AcceptOutcome| serde_json::to_string(outcome).unwrap();
+        assert_eq!(json(&AcceptOutcome::Stored), r#"{"kind":"stored"}"#);
+        assert_eq!(json(&AcceptOutcome::Ignored), r#"{"kind":"ignored"}"#);
+        assert_eq!(
+            json(&AcceptOutcome::Rejected {
+                reason: "state does not match".to_string()
+            }),
+            r#"{"kind":"rejected","reason":"state does not match"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&SignOutOutcome::SignedOut {
+                server_notified: true
+            })
+            .unwrap(),
+            r#"{"kind":"signedOut","server_notified":true}"#
         );
     }
 

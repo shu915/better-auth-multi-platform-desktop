@@ -4,6 +4,8 @@ import {
   parseRequestResult,
   parseSignedIn,
   parseSignOutResult,
+  parseTakenLinkResult,
+  type LinkResult,
   type RequestResult,
   type SignOutResult,
 } from './auth-outcomes';
@@ -32,5 +34,16 @@ export async function signOut(): Promise<SignOutResult> {
     return parseSignOutResult(await invoke<unknown>('sign_out'));
   } catch {
     return { kind: 'failed' };
+  }
+}
+
+// The result of the last mail link Rust handled (once; null when there is none). It comes from the
+// Rust command, not from the event: the event is only a nudge, and the screen does not trust what
+// an event carries.
+export async function takeLinkResult(): Promise<LinkResult | null> {
+  try {
+    return parseTakenLinkResult(await invoke<unknown>('take_auth_outcome'));
+  } catch {
+    return null;
   }
 }

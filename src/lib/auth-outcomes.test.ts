@@ -4,6 +4,8 @@ import {
   linkMessage,
   parseLinkResult,
   parseRequestResult,
+  parseTakenLinkResult,
+  screenAfterRefresh,
   parseSignedIn,
   parseSignOutResult,
   requestMessage,
@@ -100,9 +102,47 @@ describe('parseLinkResult', () => {
   });
 });
 
+describe('parseTakenLinkResult', () => {
+  it('is null when Rust has nothing to report', () => {
+    expect(parseTakenLinkResult(null)).toBeNull();
+    expect(parseTakenLinkResult(undefined)).toBeNull();
+  });
+
+  it('reads what Rust reports like a link result', () => {
+    expect(parseTakenLinkResult({ kind: 'stored' })).toEqual({ kind: 'stored' });
+    expect(parseTakenLinkResult({ kind: 'rejected', reason: 'x' })).toEqual({ kind: 'rejected' });
+    expect(parseTakenLinkResult({ kind: 'weird' })).toEqual({ kind: 'failed' });
+  });
+});
+
 describe('linkMessage', () => {
   it('explains a refused link and a failed one differently', () => {
     expect(linkMessage({ kind: 'rejected' })).toContain('期限');
     expect(linkMessage({ kind: 'failed' })).toContain('ログインできませんでした');
+  });
+});
+
+describe('screenAfterRefresh', () => {
+  it('keeps what Rust said about the session when no link was handled', () => {
+    expect(screenAfterRefresh(true, null)).toEqual({ signedIn: true, message: null });
+    expect(screenAfterRefresh(false, null)).toEqual({ signedIn: false, message: null });
+  });
+
+  it('signs in for a stored link even when the session was read just before it was saved', () => {
+    expect(screenAfterRefresh(false, { kind: 'stored' })).toEqual({ signedIn: true, message: '' });
+    expect(screenAfterRefresh(true, { kind: 'stored' })).toEqual({ signedIn: true, message: '' });
+  });
+
+  it('shows a message, and does not sign in, for a refused or failed link', () => {
+    const rejected = screenAfterRefresh(false, { kind: 'rejected' });
+    expect(rejected.signedIn).toBe(false);
+    expect(rejected.message).toContain('期限');
+    const failed = screenAfterRefresh(false, { kind: 'failed' });
+    expect(failed.signedIn).toBe(false);
+    expect(failed.message).toContain('ログインできませんでした');
+  });
+
+  it('does not sign anyone out because of a refused link', () => {
+    expect(screenAfterRefresh(true, { kind: 'rejected' }).signedIn).toBe(true);
   });
 });

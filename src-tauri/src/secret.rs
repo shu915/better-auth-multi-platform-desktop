@@ -1,8 +1,7 @@
 //! Keychain への保存。秘密は Rust の中だけに置き、JS には値を返さない。
 //!
-//! 保存先は `Slot`(決まった名前だけ)。JS が名前を指定して読み書きできるのは練習用の 1 つだけで、
-//! セッションと pending は Rust の内部だけが触る。判断(名前と値の検証)は純粋な関数に分けて、
-//! `cargo test` で試す。Keychain 本体を触る部分は OS に依存するので、テストでは触らない
+//! 保存先は `Slot`(決まった名前だけ)。Keychain に触れるのは Rust の内部だけで、JS には、保存・
+//! 読み出しのコマンドを一切公開しない。判断(値の検証)は純粋な関数に分けて、`cargo test` で試す。Keychain 本体を触る部分は OS に依存するので、テストでは触らない
 //! (テストでは `Store` を、メモリ上の偽物に差し替える)。
 
 use keyring::Entry;
@@ -15,8 +14,6 @@ const MAX_VALUE_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
-    /// 練習用。JS のコマンドから読み書きできる唯一の項目。
-    Practice,
     /// ログイン中のセッション(`名前=値`)。Rust の内部だけ。
     Session,
     /// 自分が始めたログインの一覧(JSON)。Rust の内部だけ。
@@ -27,24 +24,14 @@ impl Slot {
     /// Keychain の「アカウント名」。
     fn account(self) -> &'static str {
         match self {
-            Slot::Practice => "practice",
             Slot::Session => "session",
             Slot::Pending => "pending_sign_in",
-        }
-    }
-
-    /// JS が指定した名前を、JS に開けてよい項目に直す。ここにない名前(セッションなど)は拒否する。
-    pub fn from_js(name: &str) -> Result<Slot, SecretError> {
-        match name {
-            "practice" => Ok(Slot::Practice),
-            _ => Err(SecretError::UnknownName),
         }
     }
 }
 
 #[derive(Debug, PartialEq)]
 pub enum SecretError {
-    UnknownName,
     EmptyValue,
     ValueTooLarge,
     Keychain(String),
@@ -53,7 +40,6 @@ pub enum SecretError {
 impl std::fmt::Display for SecretError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SecretError::UnknownName => write!(f, "unknown secret name"),
             SecretError::EmptyValue => write!(f, "value is empty"),
             SecretError::ValueTooLarge => write!(f, "value is too large"),
             // Keychain のエラーの詳細は、JS には渡さない(ログにも値は含まれない)。
@@ -146,24 +132,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn js_can_open_only_the_practice_slot() {
-        assert_eq!(Slot::from_js("practice"), Ok(Slot::Practice));
-        for name in [
-            "session",
-            "pending_sign_in",
-            "",
-            "practice ",
-            "../practice",
-            "Practice",
-        ] {
-            assert_eq!(Slot::from_js(name), Err(SecretError::UnknownName), "{name}");
-        }
-    }
-
-    #[test]
     fn slots_use_different_accounts() {
-        let accounts = [Slot::Practice, Slot::Session, Slot::Pending].map(Slot::account);
-        assert_eq!(accounts, ["practice", "session", "pending_sign_in"]);
+        let accounts = [Slot::Session, Slot::Pending].map(Slot::account);
+        assert_eq!(accounts, ["session", "pending_sign_in"]);
     }
 
     #[test]

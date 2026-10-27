@@ -40,6 +40,24 @@ export function parseLinkResult(value: unknown): LinkResult | null {
   return { kind: 'failed' };
 }
 
+// The answer of `take_auth_outcome`: nothing to report is null.
+export const parseTakenLinkResult = (value: unknown): LinkResult | null =>
+  value === null || value === undefined ? null : parseLinkResult(value);
+
+// What the screen shows after it asked Rust. `signedIn` is what `session_status` said and `result`
+// what `take_auth_outcome` said. A result of `stored` signs the screen in even when `signedIn` was
+// read just before the session was saved (a link that launched the app is traded while the screen
+// starts, so the two answers can disagree); it is Rust's own report, not something a screen event
+// carries. `message` is null when there is nothing to change.
+export function screenAfterRefresh(
+  signedIn: boolean,
+  result: LinkResult | null,
+): { signedIn: boolean; message: string | null } {
+  if (result === null) return { signedIn, message: null };
+  if (result.kind === 'stored') return { signedIn: true, message: '' };
+  return { signedIn, message: linkMessage(result) };
+}
+
 // `session_status` answers true or false; anything else is treated as signed out.
 export const parseSignedIn = (value: unknown): boolean => value === true;
 
