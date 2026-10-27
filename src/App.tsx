@@ -1,49 +1,68 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+// 段階 1 の練習用の画面。Rust のコマンドを呼んで Keychain に保存・確認・削除する。
+// 保存した値は読み出さない(Rust は「あるか」だけを返す)。
+const NAME = "practice";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+function App() {
+  const [value, setValue] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function run(action: () => Promise<string>) {
+    try {
+      setMessage(await action());
+    } catch (e) {
+      setMessage(`失敗: ${String(e)}`);
+    }
   }
+
+  const save = () =>
+    run(async () => {
+      await invoke("secret_save", { name: NAME, value });
+      setValue("");
+      return "Keychain に保存しました";
+    });
+
+  const check = () =>
+    run(async () => {
+      const exists = await invoke<boolean>("secret_exists", { name: NAME });
+      return exists ? "値があります" : "値はありません";
+    });
+
+  const remove = () =>
+    run(async () => {
+      await invoke("secret_delete", { name: NAME });
+      return "削除しました";
+    });
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
+      <h1>Keychain の練習</h1>
       <form
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          greet();
+          void save();
         }}
       >
         <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+          value={value}
+          onChange={(e) => setValue(e.currentTarget.value)}
+          placeholder="保存する値"
         />
-        <button type="submit">Greet</button>
+        <button type="submit">保存</button>
       </form>
-      <p>{greetMsg}</p>
+      <div className="row">
+        <button type="button" onClick={() => void check()}>
+          あるか確認
+        </button>
+        <button type="button" onClick={() => void remove()}>
+          削除
+        </button>
+      </div>
+      <p>{message}</p>
     </main>
   );
 }
