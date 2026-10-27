@@ -38,5 +38,6 @@ claude-progress.txt (desktop)
 - Web の /api/auth/expo-authorization-proxy の open redirect(モバイルと共通の未対応)
 - 引き換えが失敗すると、そのリンクは使い切りで、再試行できない(もう一度リンクを頼む。設計どおり)
 - リリースビルドは、診断を何も出さない(段階 6 で見る)
+- Cargo.lock で rust-ini を 0.21.1 に固定している。0.21.3 は ParseOption に項目を足し、tauri-plugin-deep-link 2.6.2 の Linux 用のコードがコンパイルできなくなる(CI は Ubuntu で落ちるが、Mac では気づかない)。deep-link の新しい版が出たら、固定を外せるか試す(cargo update -p rust-ini で、CI が通るか)
 - Dependabot の glib(Linux 用、Tauri が固定)は、更新できないと失敗扱いになる。Mac には関係ない
 - 残りのリモートブランチの削除(あとでまとめて)
