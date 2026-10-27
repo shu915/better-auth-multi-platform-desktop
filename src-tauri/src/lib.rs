@@ -1,4 +1,5 @@
 mod secret;
+pub mod sign_in_rules;
 
 // Tauri のコマンドは薄く保つ。判断は secret.rs の純粋な関数に置く。
 // 値を読み出して JS に返すコマンドは作らない(秘密を JS に出さない)。
