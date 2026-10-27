@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  linkMessage,
+  parseLinkResult,
   parseRequestResult,
+  parseTakenLinkResult,
+  screenAfterRefresh,
   parseSignedIn,
   parseSignOutResult,
   requestMessage,
@@ -72,5 +76,73 @@ describe('requestMessage', () => {
     expect(requestMessage({ kind: 'failed', status: 429 })).toContain('回数');
     expect(requestMessage({ kind: 'failed', status: 500 })).toContain('送れませんでした');
     expect(requestMessage({ kind: 'failed', status: null })).toContain('送れませんでした');
+  });
+});
+
+describe('parseLinkResult', () => {
+  it('signs in only for a stored session', () => {
+    expect(parseLinkResult({ kind: 'stored' })).toEqual({ kind: 'stored' });
+  });
+
+  it('keeps a refused link apart from a failed one', () => {
+    expect(parseLinkResult({ kind: 'rejected', reason: 'state does not match' })).toEqual({
+      kind: 'rejected',
+    });
+    expect(parseLinkResult({ kind: 'failed', reason: 'exchange refused' })).toEqual({ kind: 'failed' });
+  });
+
+  it('shows nothing for an ignored link', () => {
+    expect(parseLinkResult({ kind: 'ignored' })).toBeNull();
+  });
+
+  it('treats anything unexpected as a failure, never as a sign-in', () => {
+    for (const value of [null, undefined, 'stored', 1, [], {}, { kind: 'Stored' }, { kind: 1 }]) {
+      expect(parseLinkResult(value)).toEqual({ kind: 'failed' });
+    }
+  });
+});
+
+describe('parseTakenLinkResult', () => {
+  it('is null when Rust has nothing to report', () => {
+    expect(parseTakenLinkResult(null)).toBeNull();
+    expect(parseTakenLinkResult(undefined)).toBeNull();
+  });
+
+  it('reads what Rust reports like a link result', () => {
+    expect(parseTakenLinkResult({ kind: 'stored' })).toEqual({ kind: 'stored' });
+    expect(parseTakenLinkResult({ kind: 'rejected', reason: 'x' })).toEqual({ kind: 'rejected' });
+    expect(parseTakenLinkResult({ kind: 'weird' })).toEqual({ kind: 'failed' });
+  });
+});
+
+describe('linkMessage', () => {
+  it('explains a refused link and a failed one differently', () => {
+    expect(linkMessage({ kind: 'rejected' })).toContain('期限');
+    expect(linkMessage({ kind: 'failed' })).toContain('ログインできませんでした');
+  });
+});
+
+describe('screenAfterRefresh', () => {
+  it('keeps what Rust said about the session when no link was handled', () => {
+    expect(screenAfterRefresh(true, null)).toEqual({ signedIn: true, message: null });
+    expect(screenAfterRefresh(false, null)).toEqual({ signedIn: false, message: null });
+  });
+
+  it('signs in for a stored link even when the session was read just before it was saved', () => {
+    expect(screenAfterRefresh(false, { kind: 'stored' })).toEqual({ signedIn: true, message: '' });
+    expect(screenAfterRefresh(true, { kind: 'stored' })).toEqual({ signedIn: true, message: '' });
+  });
+
+  it('shows a message, and does not sign in, for a refused or failed link', () => {
+    const rejected = screenAfterRefresh(false, { kind: 'rejected' });
+    expect(rejected.signedIn).toBe(false);
+    expect(rejected.message).toContain('期限');
+    const failed = screenAfterRefresh(false, { kind: 'failed' });
+    expect(failed.signedIn).toBe(false);
+    expect(failed.message).toContain('ログインできませんでした');
+  });
+
+  it('does not sign anyone out because of a refused link', () => {
+    expect(screenAfterRefresh(true, { kind: 'rejected' }).signedIn).toBe(true);
   });
 });

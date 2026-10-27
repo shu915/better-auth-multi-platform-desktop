@@ -4,34 +4,20 @@ mod secret;
 pub mod session_cookie;
 pub mod sign_in_rules;
 
-use auth::{AuthState, RequestOutcome, SignOutOutcome};
-use secret::{KeychainStore, Slot, Store};
+use auth::{AcceptOutcome, AuthState, RequestOutcome, SignOutOutcome};
+use secret::KeychainStore;
+use sign_in_rules::{LinkVerdict, judge_link};
+use tauri::{Emitter, Manager};
+use tauri_plugin_deep_link::DeepLinkExt;
+
+/// 画面への合図。「リンクの結果が出た」というだけで、中身は運ばない。結果は、画面が
+/// `take_auth_outcome` で Rust から取る(画面が、イベントの中身を信じなくて済む。起動時のリンクの
+/// 結果を、画面の準備が間に合わなくても、取りこぼさない)。
+const AUTH_EVENT: &str = "auth-changed";
 
 // Tauri のコマンドは薄く保つ。判断は純粋な関数(sign_in_rules.rs など)に置き、流れは auth.rs に置く。
-// 値を読み出して JS に返すコマンドは作らない(秘密を JS に出さない)。
-// エラーは JS には種類だけを文字列で返す(Keychain の詳細は返さない)。
-
-// 練習用(段階 1)。JS が開けるのは `practice` だけで、セッションなどには触れない。
-#[tauri::command]
-fn secret_save(name: &str, value: &str) -> Result<(), String> {
-    let slot = Slot::from_js(name).map_err(|e| e.to_string())?;
-    KeychainStore.save(slot, value).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn secret_exists(name: &str) -> Result<bool, String> {
-    let slot = Slot::from_js(name).map_err(|e| e.to_string())?;
-    KeychainStore
-        .load(slot)
-        .map(|value| value.is_some())
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn secret_delete(name: &str) -> Result<(), String> {
-    let slot = Slot::from_js(name).map_err(|e| e.to_string())?;
-    KeychainStore.delete(slot).map_err(|e| e.to_string())
-}
+// Keychain の保存・読み出しを JS に公開するコマンドは作らない(秘密を JS に出さない)。
+// エラーは JS には種類だけを返す(Keychain の詳細は返さない)。
 
 /// マジックリンクのメールを頼む。
 #[tauri::command]
@@ -55,28 +41,90 @@ fn session_status() -> bool {
     auth::is_signed_in(&KeychainStore)
 }
 
+/// 最後に処理したリンクの結果を渡す(1 回だけ。なければ `null`)。
+#[tauri::command]
+fn take_auth_outcome(state: tauri::State<'_, AuthState>) -> Option<AcceptOutcome> {
+    state.take_outcome()
+}
+
 /// ログアウト。この Mac のセッションは必ず消す。
 #[tauri::command]
-async fn sign_out() -> Result<SignOutOutcome, String> {
+async fn sign_out(state: tauri::State<'_, AuthState>) -> Result<SignOutOutcome, String> {
     let outcome = match config::web_url() {
-        Ok(base) => auth::sign_out(&KeychainStore, &base).await,
+        Ok(base) => auth::sign_out(&state, &KeychainStore, &base).await,
         // 接続先が決まらなくても、この Mac のセッションは消せる。
-        Err(_) => auth::sign_out(&KeychainStore, "").await,
+        Err(_) => auth::sign_out(&state, &KeychainStore, "").await,
     };
     Ok(outcome)
+}
+
+/// OS から渡されたリンク(`betterauthmulti://…`)を、ログインの処理に回す。
+/// リンクの中身は、ログにも画面にも出さない。ログインのリンクでないもの(`Ignored`)は黙って捨てる。
+fn handle_link(app: tauri::AppHandle, link: String) {
+    // ログインのリンクでないもの(`state` や `code` のない `betterauthmulti://…`)は、接続先の設定の
+    // 確認より前に捨てる。設定が欠けているときに、無関係なリンクで、アプリを前に出させない。
+    if judge_link(&link) == LinkVerdict::Ignored {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AuthState>();
+        let outcome = match config::web_url() {
+            Ok(base) => auth::accept_sign_in_link(&state, &KeychainStore, &base, &link).await,
+            Err(error) => AcceptOutcome::Failed {
+                reason: error.to_string(),
+            },
+        };
+        if outcome == AcceptOutcome::Ignored {
+            return;
+        }
+        // デバッグビルドだけ、結果の種類を出す(`reason` は固定の文字列で、秘密は入らない)。
+        auth::debug_log(&format!("link outcome: {outcome:?}"));
+        // アプリを前に出すのは、ログインできたときと、自分が頼んだリンクの処理が失敗したときだけ。
+        // 自分が頼んでいないリンク(`Rejected`)で、誰でも前面を奪ったり、表示を出させたりできないように。
+        let bring_front = matches!(
+            outcome,
+            AcceptOutcome::Stored | AcceptOutcome::Failed { .. }
+        );
+        state.set_outcome(outcome);
+        if bring_front && let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        let _ = app.emit_to("main", AUTH_EVENT, ());
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(AuthState::new())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            // リンクを押してアプリが起動したとき(まだ動いていなかったとき)のリンク。取れなくても、
+            // アプリの起動は続ける(ログイン画面まで使えなくならないように)。
+            match app.deep_link().get_current() {
+                Ok(Some(urls)) => {
+                    for url in urls {
+                        handle_link(handle.clone(), url.to_string());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => auth::debug_log(&format!("reading the launch link failed: {error}")),
+            }
+            // アプリが動いているときに届くリンク。
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    handle_link(handle.clone(), url.to_string());
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            secret_save,
-            secret_exists,
-            secret_delete,
             request_sign_in_link,
             session_status,
+            take_auth_outcome,
             sign_out
         ])
         .run(tauri::generate_context!())
