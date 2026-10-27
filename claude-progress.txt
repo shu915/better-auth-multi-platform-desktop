@@ -17,7 +17,7 @@ claude-progress.txt (desktop)
 2. 段階 3: プロフィールの閲覧と編集(JWT を /api/auth/token で取り、Go の bio、Web の name)。Go の URL(API_URL)をビルド時に埋め込む(config.rs に足す)
 3. 段階 4: 退会(メールの再入力、5 分以内のログイン)
 4. 段階 5: Google の連携とサインイン(Web の open redirect の修正を先に)
-5. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認。無料の Apple Development 証明書で署名すると、ビルドし直しても Keychain の許可を聞かれない
+5. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認(署名付きで。リリースビルドは、診断を何も出さない点も見る)
 
 ## 決めたこと
 - 範囲: メールのログイン、プロフィール、退会 → 動いたら Google
@@ -28,11 +28,11 @@ claude-progress.txt (desktop)
 - Web の URL は AUTH_WEB_URL、Go の URL は AUTH_API_URL で、ビルド時に埋め込む。デバッグの既定は http://localhost:3000 と http://localhost:8080、リリースは https 必須(AUTH_WEB_URL=… AUTH_API_URL=… npm run tauri build)
 
 ## .app を試すとき(deep link は、ビルドした .app を /Applications に入れたときだけ届く)
-- ビルド: npm run tauri build -- --debug --bundles app(デバッグビルドは localhost に繋げる。リリースは https 必須)
+- ビルド(署名付き。人が自分のターミナルで): IDENTITY=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1) して APPLE_SIGNING_IDENTITY="$IDENTITY" npm run tauri build -- --debug --bundles app(デバッグビルドは localhost に繋げる。リリースは https 必須)。詳しくは CLAUDE.md の「署名」
 - 入れ替え: rm -rf "/Applications/Auth Practice.app" && cp -R src-tauri/target/debug/bundle/macos/"Auth Practice.app" /Applications/
 - ログを見る: "/Applications/Auth Practice.app/Contents/MacOS/tauri-app" をターミナルから起動(デバッグビルドは [auth] link outcome: … を出す。秘密は出さない)
 - 偽リンクを試す: open -g "betterauthmulti:///?state=zzz&code=$(date +%s)"(code は毎回変える。同じ code は 2 回目から無視される。-g がないと open が前に出す)
-- ビルドし直すと、Keychain の許可を聞かれる(署名がないため)。「常に許可」を選ぶ
+- 署名付きなら、ビルドし直しても Keychain の許可は聞かれない(実機で、署名付きで 2 回ビルドして確認)。署名なしのバイナリ(tauri dev など)は、聞かれる。「常に許可」を選ぶ
 
 ## 既知の注意
 - Web の /api/auth/expo-authorization-proxy の open redirect(モバイルと共通の未対応)
@@ -40,4 +40,5 @@ claude-progress.txt (desktop)
 - リリースビルドは、診断を何も出さない(段階 6 で見る)
 - Cargo.lock で rust-ini を 0.21.1 に固定している。0.21.3 は ParseOption に項目を足し、tauri-plugin-deep-link 2.6.2 の Linux 用のコードがコンパイルできなくなる(CI は Ubuntu で落ちるが、Mac では気づかない)。deep-link の新しい版が出たら、固定を外せるか試す(cargo update -p rust-ini で、CI が通るか)
 - Dependabot の glib(Linux 用、Tauri が固定)は、更新できないと失敗扱いになる。Mac には関係ない
+- 署名の証明書(無料の Apple Development)は、2027 年 10 月 27 日に切れる。更新したら、Keychain の許可を、もう一度聞かれることがある
 - 残りのリモートブランチの削除(あとでまとめて)
