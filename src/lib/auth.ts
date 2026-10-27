@@ -9,6 +9,7 @@ import {
   type RequestResult,
   type SignOutResult,
 } from './auth-outcomes';
+import { parseSaveResult, type SaveResult } from './profile-edit';
 import { parseLoadResult, type LoadResult } from './profile-outcomes';
 
 // Thin calls to the Rust commands. The state, the verifier and the session stay in Rust; the screen
@@ -56,5 +57,21 @@ export async function loadProfile(): Promise<LoadResult> {
     return parseLoadResult(await invoke<unknown>('load_profile'));
   } catch {
     return { kind: 'failed' };
+  }
+}
+
+// Saves what changed, through Rust: the name at the web app, the bio at the Go API. Rust checks the
+// input against the rules first, and sends nothing if it breaks one. The screen passes what is saved
+// now and what is being edited; Rust decides what to send again, and the servers have the last word.
+export async function saveProfile(input: {
+  savedName: string;
+  nameDraft: string;
+  savedBio: string;
+  bioDraft: string;
+}): Promise<SaveResult> {
+  try {
+    return parseSaveResult(await invoke<unknown>('save_profile', input));
+  } catch {
+    return parseSaveResult(null);
   }
 }

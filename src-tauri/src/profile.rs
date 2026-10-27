@@ -1013,6 +1013,132 @@ mod tests {
         );
     }
 
+    /// 読むたびに答えが替わる置き場。最初に読むと古いセッション、2 回目から新しいセッション。
+    /// 「失敗の最中に、別のセッションに替わった」状況を、配線ごと再現する(`load_profile` と
+    /// `save_profile` が、**最初に読んだセッション**を `end_session` に渡しているかを守る)。
+    #[derive(Default)]
+    struct SwitchingStore {
+        reads: std::sync::Mutex<u32>,
+        deleted: std::sync::Mutex<bool>,
+    }
+
+    impl Store for SwitchingStore {
+        fn load(&self, slot: Slot) -> Result<Option<String>, crate::secret::SecretError> {
+            if slot != Slot::Session {
+                return Ok(None);
+            }
+            let mut reads = self.reads.lock().unwrap();
+            *reads += 1;
+            let value = if *reads == 1 { "old" } else { "new" };
+            Ok(Some(format!("better-auth.session_token={value}")))
+        }
+        fn save(&self, _slot: Slot, _value: &str) -> Result<(), crate::secret::SecretError> {
+            Ok(())
+        }
+        fn delete(&self, slot: Slot) -> Result<(), crate::secret::SecretError> {
+            if slot == Slot::Session {
+                *self.deleted.lock().unwrap() = true;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn loading_does_not_forget_a_session_that_was_replaced_while_it_ran() {
+        let web = serve(vec![(401, "{}")]);
+        let store = SwitchingStore::default();
+        // 古いセッションで 401 が返る間に、新しいセッションに替わっている。
+        assert_eq!(
+            run(load_profile(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &dead_base()
+            )),
+            LoadOutcome::Failed
+        );
+        assert!(!*store.deleted.lock().unwrap());
+    }
+
+    #[test]
+    fn loading_does_not_forget_a_session_replaced_while_the_token_was_asked_for() {
+        // get-session は通り、/token が 401: そのあいだに、別のセッションに替わっていた。
+        let web = serve(vec![(200, USER_JSON), (401, "{}")]);
+        let store = SwitchingStore::default();
+        assert_eq!(
+            run(load_profile(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &dead_base()
+            )),
+            LoadOutcome::Failed
+        );
+        assert!(!*store.deleted.lock().unwrap());
+    }
+
+    #[test]
+    fn saving_does_not_forget_a_session_that_was_replaced_while_it_ran() {
+        let failed_name = SaveOutcome::Failed {
+            field: Some(Field::Name),
+            refused: false,
+            refusal: None,
+            name_saved: None,
+        };
+        // 名前の保存が 401
+        let web = serve(vec![(401, "{}")]);
+        let store = SwitchingStore::default();
+        assert_eq!(
+            run(save_profile(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &dead_base(),
+                &input("Bob", "hello")
+            )),
+            failed_name
+        );
+        assert!(!*store.deleted.lock().unwrap());
+
+        // bio の保存で、JWT の取得が 401
+        let web = serve(vec![(401, "{}")]);
+        let store = SwitchingStore::default();
+        assert_eq!(
+            run(save_profile(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &dead_base(),
+                &input("Alice", "new")
+            )),
+            SaveOutcome::Failed {
+                field: Some(Field::Bio),
+                refused: false,
+                refusal: None,
+                name_saved: None,
+            }
+        );
+        assert!(!*store.deleted.lock().unwrap());
+    }
+
+    #[test]
+    fn a_session_that_is_still_the_same_is_forgotten_on_a_401() {
+        // 対照: 置き場が替わらなければ、同じ 401 で、セッションを消す。
+        let web = serve(vec![(401, "{}")]);
+        let store = signed_in();
+        assert_eq!(
+            run(save_profile(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &dead_base(),
+                &input("Bob", "hello")
+            )),
+            SaveOutcome::SessionEnded
+        );
+        assert!(!has_session(&store));
+    }
+
     #[test]
     fn a_token_answer_that_could_not_be_read_does_not_end_the_session() {
         // /token が 200 でも本文が壊れている: bio は読めないが、セッションは消さない。
