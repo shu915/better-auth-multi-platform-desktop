@@ -86,6 +86,15 @@ fn client() -> Result<reqwest::Client, &'static str> {
         .map_err(|_| "http client failed")
 }
 
+/// デバッグビルドだけ、原因の切り分けのために標準エラーに出す(リリースビルドでは何も出さない)。
+/// 出してよいのは、固定の種類名、HTTP ステータス、Keychain のエラーの種類だけ。秘密(verifier、
+/// code、セッションの値)は、決して渡さない。
+fn debug_log(message: &str) {
+    if cfg!(debug_assertions) {
+        eprintln!("[auth] {message}");
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -270,13 +279,17 @@ pub async fn accept_sign_in_link(
         let _guard = auth.pending_lock.lock().await;
         let list = match store.load(Slot::Pending) {
             Ok(raw) => parse_pending_list(raw.as_deref()),
-            Err(_) => return accept_failed("storage failed"),
+            Err(error) => {
+                debug_log(&format!("loading pending failed: {error:?}"));
+                return accept_failed("storage failed");
+            }
         };
         let consumed = consume_pending(&list, &state, now_ms());
         let rest = match &consumed {
             Consumed::Accepted { rest, .. } | Consumed::Refused { rest, .. } => rest,
         };
-        if save_pending(store, rest).is_err() {
+        if let Err(error) = save_pending(store, rest) {
+            debug_log(&format!("saving pending failed: {error:?}"));
             return accept_failed("storage failed");
         }
         consumed
@@ -295,25 +308,45 @@ pub async fn accept_sign_in_link(
     };
     match store.save(Slot::Session, &session.pair()) {
         Ok(()) => AcceptOutcome::Stored,
-        Err(_) => accept_failed("storage failed"),
+        Err(error) => {
+            debug_log(&format!("saving the session failed: {error:?}"));
+            accept_failed("storage failed")
+        }
     }
 }
 
 /// 1 回限りの `code` と `verifier` を、セッションに引き換える。Web は、`SHA-256(verifier)` が、
 /// リンクを頼んだときの challenge と合うかを調べる。失敗の理由は区別しない(Web も区別しない)。
 async fn exchange_code(base: &str, code: &str, verifier: &str) -> Option<SessionCookie> {
-    let res = client()
+    let sent = client()
         .ok()?
         .post(format!("{base}/api/mobile/exchange"))
         .json(&serde_json::json!({ "code": code, "verifier": verifier }))
         .send()
-        .await
-        .ok()?;
+        .await;
+    let res = match sent {
+        Ok(res) => res,
+        Err(error) => {
+            debug_log(&format!("exchange: {}", failure_reason(&error)));
+            return None;
+        }
+    };
     if !res.status().is_success() {
+        debug_log(&format!(
+            "exchange: refused with status {}",
+            res.status().as_u16()
+        ));
         return None;
     }
     let body: serde_json::Value = serde_json::from_slice(&read_limited(res).await?).ok()?;
-    parse_session_cookie(body.get("cookie")?.as_str()?)
+    let session = body
+        .get("cookie")
+        .and_then(|c| c.as_str())
+        .and_then(parse_session_cookie);
+    if session.is_none() {
+        debug_log("exchange: the answer held no session");
+    }
+    session
 }
 
 // --- ログイン状態、ログアウト ---

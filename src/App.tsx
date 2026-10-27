@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
+import { listen } from "@tauri-apps/api/event";
 import { isSignedIn, requestSignInLink, signOut } from "./lib/auth";
 import {
+  linkMessage,
+  parseLinkResult,
   requestMessage,
   signOutFailedMessage,
 } from "./lib/auth-outcomes";
@@ -23,6 +26,30 @@ function App() {
     });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // The mail link is opened in the browser, which hands it to the app; Rust trades it for a session
+  // and tells the screen how it went (src-tauri/src/lib.rs).
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<unknown>("auth-changed", (event) => {
+      const result = parseLinkResult(event.payload);
+      if (result === null) return;
+      if (result.kind === "stored") {
+        setMessage("");
+        setStatus("signed-in");
+      } else {
+        setMessage(linkMessage(result));
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 

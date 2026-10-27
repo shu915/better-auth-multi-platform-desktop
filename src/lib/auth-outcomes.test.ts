@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  linkMessage,
+  parseLinkResult,
   parseRequestResult,
   parseSignedIn,
   parseSignOutResult,
@@ -72,5 +74,35 @@ describe('requestMessage', () => {
     expect(requestMessage({ kind: 'failed', status: 429 })).toContain('回数');
     expect(requestMessage({ kind: 'failed', status: 500 })).toContain('送れませんでした');
     expect(requestMessage({ kind: 'failed', status: null })).toContain('送れませんでした');
+  });
+});
+
+describe('parseLinkResult', () => {
+  it('signs in only for a stored session', () => {
+    expect(parseLinkResult({ kind: 'stored' })).toEqual({ kind: 'stored' });
+  });
+
+  it('keeps a refused link apart from a failed one', () => {
+    expect(parseLinkResult({ kind: 'rejected', reason: 'state does not match' })).toEqual({
+      kind: 'rejected',
+    });
+    expect(parseLinkResult({ kind: 'failed', reason: 'exchange refused' })).toEqual({ kind: 'failed' });
+  });
+
+  it('shows nothing for an ignored link', () => {
+    expect(parseLinkResult({ kind: 'ignored' })).toBeNull();
+  });
+
+  it('treats anything unexpected as a failure, never as a sign-in', () => {
+    for (const value of [null, undefined, 'stored', 1, [], {}, { kind: 'Stored' }, { kind: 1 }]) {
+      expect(parseLinkResult(value)).toEqual({ kind: 'failed' });
+    }
+  });
+});
+
+describe('linkMessage', () => {
+  it('explains a refused link and a failed one differently', () => {
+    expect(linkMessage({ kind: 'rejected' })).toContain('期限');
+    expect(linkMessage({ kind: 'failed' })).toContain('ログインできませんでした');
   });
 });
