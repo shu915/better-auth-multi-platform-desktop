@@ -27,12 +27,29 @@ Tauri 2(Rust)/ React 19 / TypeScript / Vite 8 / Vitest 5 / ESLint 9
 
 ## コマンド
 - `npm run tauri dev`: 開発起動(Vite + Rust のビルド。初回は数分)
-- `npm run tauri build`: `.app` を作る(署名なし。自分の Mac 用)
+- `npm run tauri build`: `.app` を作る。**署名を付けて作る**(下の「署名」)。署名なしだと、ビルドごとに Keychain の許可を聞かれる
 - `npm run lint` / `npx tsc --noEmit` / `npm test`(Vitest。`src/**/*.test.ts`。ロジックだけ、画面は試さない)
 - `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` / `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` / `cargo test --manifest-path src-tauri/Cargo.toml`
 - Rust は `~/.cargo/env` で PATH に入る(hooks も読み込む)
 - `better-auth` を足したら Web と同じ版に固定する(`^` なし)。上げるときは Web と同時に。`@tauri-apps/*`(npm)と `tauri*`(cargo)は一緒に上げる(IPC が壊れる)
 - 依存を足したあと、`package-lock.json` の `@rolldown/binding-*`(Linux 用を含む)が消えていないか確認する(`grep -c '"node_modules/@rolldown/binding-' package-lock.json` が 0 でないこと)。確認は `npm ci --dry-run`
+
+## 署名(macOS。自分の Mac 専用)
+- 目的: Keychain の許可を、ビルドし直しても聞かれないようにする。macOS は許可を、アプリの**署名の身元**と結びつけて覚える。署名なしは、ビルドごとに別のアプリに見えるので、毎回聞かれる。同じ証明書で署名し続ければ、最初の 1 回だけ(署名のとき、codesign が鍵の使用を聞くので「常に許可」)
+- 証明書: 無料の **Apple Development** 証明書(Xcode の Settings → Accounts → Manage Certificates → + で作る。有料のアカウントは要らない)。確認: `security find-identity -v -p codesigning` が 1 件出ること
+- 0 件のときは、キーチェーンのリセットなどで、**Apple の中間証明書(Worldwide Developer Relations - G3)**が消えている。https://www.apple.com/certificateauthority/ から入れ直す(ログインキーチェーンに追加)。`security find-certificate -c "Apple Development" -p | openssl x509 -noout -issuer` で、必要な世代(G3 など)が分かる
+- ビルド: 証明書の名前は、**環境変数で渡し、リポジトリには書かない**(`tauri.conf.json` に書かない)。空のまま進むと、署名なしにフォールバックして、見た目は成功のまま、許可が毎回出る状態に戻る(推測。未確認)ので、**空なら止める**。`Apple Development` が複数あるとき(期限切れ、別のチーム)は、先頭を選んでしまうので、`IDENTITY` を手で指定する
+  ```
+  IDENTITY=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)
+  [ -n "$IDENTITY" ] || { echo "署名用の証明書がない" >&2; exit 1; }
+  APPLE_SIGNING_IDENTITY="$IDENTITY" npm run tauri build -- --debug --bundles app
+  codesign --verify --deep --strict "src-tauri/target/debug/bundle/macos/Auth Practice.app" && echo "署名OK"
+  ```
+- 確認: `codesign -dv --verbose=2 "src-tauri/target/debug/bundle/macos/Auth Practice.app"` に `TeamIdentifier` が出る。`codesign --verify --deep --strict` が通る
+- 期限: 無料の Apple Development 証明書は **1 年**で切れる(今の証明書は 2027 年 10 月 27 日)。切れると、署名もビルドも止まる。更新すると、署名の指定要件(証明書の名前)が変わりうる。変わったら、Keychain の許可を、もう一度聞かれる(セッションは消えない)
+- 限界: Apple Development 証明書は、自分の Mac でだけ通る。**他の Mac には配れない**(Gatekeeper が止める)。配るには、有料の Developer ID と公証が要る。このプロジェクトは配布しない
+- `betterauthmulti://` は、同じ Mac の別のアプリ(モバイルのシミュレーターのアプリ、`target/` の `.app`)にも登録されていることがある。メールのリンクを押しても、画面が変わらないときは、リンクが別のアプリに渡った可能性がある。`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump | grep -B3 -A3 betterauthmulti` で調べ、不要なものは `lsregister -u <.app のパス>` で外す。手動で試すときは、`/Applications` の `.app` だけを残す
+- Claude の実行環境からは、ログインキーチェーンが見えないことがある(`find-identity` が 0 件になる)。署名付きのビルドは、人が自分のターミナルで実行する。署名が付いたかの確認(`codesign`)は、Claude もできる
 
 ## 型の方針
 - TypeScript は `strict: true`。`any` は使わない
