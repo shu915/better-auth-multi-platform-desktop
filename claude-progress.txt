@@ -2,16 +2,17 @@ claude-progress.txt (desktop)
 最終更新: 2026-10-26
 新しいセッションは、最初にこのファイルと CLAUDE.md を読む。Web 側の認証のルールは Web の docs/design.md。手本はモバイルの src/lib/sign-in-*.ts。
 
-## 状況: 土台づくり
-Tauri 2 + React + TypeScript の雛形が動く(tauri dev でウィンドウが開く)。認証はまだ何もない。
+## 状況: 段階 1 完了(Rust と IPC、Keychain)
+Rust から Mac の Keychain に保存・確認・削除ができる(tauri dev で確認済み)。認証はまだ何もない。
 
 ## できていること
 - 雛形(main に入っている)
 - GitHub のルールセット protect-main、シークレットスキャン、Dependabot
-- 実行中: chore/harness ブランチで CI、hooks、evaluator、CLAUDE.md、ESLint、Vitest を足している(PR 前)
+- CI、hooks、evaluator、CLAUDE.md、ESLint、Vitest(PR #1、main)
+- 段階 1: src-tauri/src/secret.rs(項目名の許可リスト、値の検証、keyring v4 で保存・確認・削除。値は JS に返さない)と、練習用の画面(feat/ipc-keychain、PR 前)
 
 ## これから
-1. ハーネスの PR をマージ(CI の check が通ること)
+1. 段階 1 の PR をマージ
 2. 設計: 戻り方は独自スキーム(betterauthmulti://)、Keychain に保存、Go と Web への HTTP は Rust から(WebView からは呼ばない)
 3. Rust: state + PKCE、deep link の検証、/api/mobile/exchange への引き換え、Keychain、/api/auth/token で JWT
 4. 画面: ログイン、プロフィールの閲覧と編集(name は Web、bio は Go)、退会
