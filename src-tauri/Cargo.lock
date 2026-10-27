@@ -3688,12 +3688,15 @@ dependencies = [
 name = "tauri-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "keyring",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "url",
 ]
 
 [[package]]
