@@ -23,6 +23,7 @@ Tauri 2(Rust)/ React 19 / TypeScript / Vite 8 / Vitest 5 / ESLint 9
 - **deep link は信用しない**: 自分が始めたログインの `state` に合うものだけ受ける。独自スキームは他のアプリも登録できるので、セッションは URL に載せず、1 回限りのコード + PKCE で引き換える
 - アプリのスキーム(`betterauthmulti`)は、`tauri.conf.json` の deep-link 設定、Web の `trustedOrigins`、Rust の定数で同じにする
 - Rust は `Result` で返し、`unwrap` / `expect` / 添字で落とさない(テストは除く)。警告は直す(`#[allow]` を足さない)。`unsafe` は使わない
+- **Google の戻りは、ループバックの受け口で受ける**(`loopback.rs`、RFC 8252): 独自スキームだと、ブラウザが「アプリを開きますか?」を出し、繰り返すと出なくなるため。`127.0.0.1` の空きポートで、ログインごとに 1 つ、1 回だけ受けて閉じる(10 分)。`127.0.0.1` だけで待ち受ける、`Host` が自分のアドレスとポートでなければ断る、入力を返さない固定のページを返す。受けた内容は信用せず、`state` の突き合わせと PKCE は、deep link と同じ処理(`accept_sign_in_link`)が行う。メールのリンクは、アプリが閉じていても起動できる deep link のまま
 - macOS では deep link のスキームは**ビルドした `.app` を入れたとき**に登録される。`tauri dev` では届かないことがある
 
 ## コマンド

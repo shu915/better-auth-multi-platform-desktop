@@ -14,13 +14,13 @@ use serde::Serialize;
 use crate::api_parse::{LinkedAccount, parse_accounts, parse_authorization_url, parse_error_code};
 use crate::auth::{AuthState, begin_pending, client, forget_pending};
 use crate::link_rules::{
-    AccountFailure, classify_account_failure, link_callback_url, link_return_token, proxy_url,
+    AccountFailure, classify_account_failure, link_return_token, loopback_link_url, proxy_url,
     token_from_bytes,
 };
 use crate::profile::{Reply, call, end_session, read_session};
 use crate::secret::Store;
 use crate::session_cookie::SessionCookie;
-use crate::sign_in_rules::{APP_SCHEME, callback_url};
+use crate::sign_in_rules::{APP_SCHEME, loopback_callback_url, loopback_error_url};
 
 const GOOGLE: &str = "google";
 
@@ -51,6 +51,16 @@ impl Opener for SystemOpener {
             Err(_) => false,
         }
     }
+}
+
+/// ブラウザの戻りを受ける受け口(`loopback.rs`)を開く。テストでは、開いたふりをするものに替える。
+pub trait Receiving: Sync {
+    /// 受け口を開いて、その戻り先の URL(`http://127.0.0.1:<ポート>/cb`)を返す。開けなければ `None`。
+    /// 前の受け口は閉じる。`expect` は、待っている戻りの目印(ログインなら `state`、連携なら `link` の値)。
+    /// これを含む戻りだけを受ける(ほかのページが、形だけ合う要求を送っても、受け口は閉じない)。
+    fn listen(&self, expect: &str) -> Option<String>;
+    /// いま開いている受け口を閉じる(Web に頼めなかったときなど。戻りは来ない)。
+    fn stop(&self);
 }
 
 /// Web に `Origin` として見せる値(`auth.rs` の `origin` と同じ)。
@@ -156,6 +166,7 @@ pub async fn link_google(
     store: &dyn Store,
     web: &str,
     opener: &dyn Opener,
+    receiving: &dyn Receiving,
 ) -> LinkOutcome {
     let Some(session) = read_session(store) else {
         return LinkOutcome::SessionEnded;
@@ -168,7 +179,11 @@ pub async fn link_google(
         return LinkOutcome::Failed;
     }
     let token = token_from_bytes(&bytes);
-    let callback = link_callback_url(&token);
+    // 戻りは、アプリが開く受け口で受ける(ブラウザのポップアップに頼らない)。
+    let Some(base) = receiving.listen(&token) else {
+        return LinkOutcome::Failed;
+    };
+    let callback = loopback_link_url(&base, &token);
 
     let reply = call(
         http.post(format!("{web}/api/auth/link-social"))
@@ -185,6 +200,7 @@ pub async fn link_google(
     let reply = match reply {
         Some(reply) if reply.status == 200 => reply,
         other => {
+            receiving.stop();
             let failed = failed_reply(other.as_ref());
             return match failure_kind(auth, store, &session, &failed).await {
                 AccountFailure::SessionEnded => LinkOutcome::SessionEnded,
@@ -199,6 +215,7 @@ pub async fn link_google(
         .and_then(parse_authorization_url)
         .and_then(|authorization| proxy_url(web, &authorization))
     else {
+        receiving.stop();
         return LinkOutcome::Failed;
     };
 
@@ -207,6 +224,7 @@ pub async fn link_google(
     if opener.open(&proxy) {
         LinkOutcome::Started
     } else {
+        receiving.stop();
         LinkOutcome::Failed
     }
 }
@@ -238,12 +256,18 @@ pub async fn sign_in_with_google(
     store: &dyn Store,
     web: &str,
     opener: &dyn Opener,
+    receiving: &dyn Receiving,
 ) -> GoogleSignInOutcome {
     let failed = |status| GoogleSignInOutcome::Failed { status };
     let Ok(http) = client() else {
         return failed(None);
     };
     let Ok((state, challenge)) = begin_pending(auth, store).await else {
+        return failed(None);
+    };
+    // 戻りは、アプリが開く受け口で受ける(ブラウザのポップアップに頼らない)。
+    let Some(base) = receiving.listen(&state) else {
+        forget_pending(auth, store, &state).await;
         return failed(None);
     };
 
@@ -253,9 +277,9 @@ pub async fn sign_in_with_google(
             .header("expo-origin", origin())
             .json(&serde_json::json!({
                 "provider": GOOGLE,
-                "callbackURL": callback_url(&state, &challenge),
+                "callbackURL": loopback_callback_url(&base, &state, &challenge),
                 // 断られたときの戻り先。`state` がないと、アプリは戻りを無視するので、載せる。
-                "errorCallbackURL": format!("{APP_SCHEME}:///?state={state}"),
+                "errorCallbackURL": loopback_error_url(&base, &state),
                 "disableRedirect": true,
             })),
     )
@@ -269,10 +293,12 @@ pub async fn sign_in_with_google(
         _ => None,
     };
     let Some(proxy) = proxy else {
+        receiving.stop();
         forget_pending(auth, store, &state).await;
         return failed(reply.map(|r| r.status));
     };
     if !opener.open(&proxy) {
+        receiving.stop();
         forget_pending(auth, store, &state).await;
         return failed(None);
     }
@@ -378,6 +404,47 @@ mod tests {
         }
     }
 
+    /// 受け口を開いたふりをする。開く(`listen`)と閉じる(`stop`)の回数を数える。
+    struct Listening {
+        port: Option<u16>,
+        listened: Mutex<u32>,
+        /// 受け口に渡された、待っている目印。
+        expected: Mutex<Vec<String>>,
+        stopped: Mutex<u32>,
+    }
+
+    impl Listening {
+        fn at(port: u16) -> Self {
+            Listening {
+                port: Some(port),
+                listened: Mutex::new(0),
+                expected: Mutex::new(Vec::new()),
+                stopped: Mutex::new(0),
+            }
+        }
+
+        fn cannot() -> Self {
+            Listening {
+                port: None,
+                listened: Mutex::new(0),
+                expected: Mutex::new(Vec::new()),
+                stopped: Mutex::new(0),
+            }
+        }
+    }
+
+    impl Receiving for Listening {
+        fn listen(&self, expect: &str) -> Option<String> {
+            *self.listened.lock().unwrap() += 1;
+            self.expected.lock().unwrap().push(expect.to_string());
+            self.port.map(|port| format!("http://127.0.0.1:{port}/cb"))
+        }
+
+        fn stop(&self) {
+            *self.stopped.lock().unwrap() += 1;
+        }
+    }
+
     // --- 一覧 ---
 
     #[test]
@@ -462,7 +529,13 @@ mod tests {
         let auth = AuthState::new();
 
         assert_eq!(
-            run(link_google(&auth, &store, &web.base, &opener)),
+            run(link_google(
+                &auth,
+                &store,
+                &web.base,
+                &opener,
+                &Listening::at(51234)
+            )),
             LinkOutcome::Started
         );
 
@@ -476,10 +549,11 @@ mod tests {
         let body = body_of(&requests[0]);
         assert_eq!(body["provider"], "google");
         assert_eq!(body["disableRedirect"], true);
-        // 戻り先は、成功も断られたときも同じ(セッションも code も state も載せない)。
+        // 戻り先は、アプリが開いた受け口。成功も断られたときも同じ(セッションも code も state も載せない)。
         let callback = body["callbackURL"].as_str().unwrap().to_string();
         assert_eq!(body["errorCallbackURL"], callback.as_str());
-        assert!(callback.starts_with("betterauthmulti:///?link="));
+        assert!(callback.starts_with("http://127.0.0.1:51234/cb?link="));
+        let token = callback.rsplit('=').next().unwrap().to_string();
 
         let opened = opener.opened.lock().unwrap();
         assert_eq!(opened.len(), 1);
@@ -489,9 +563,10 @@ mod tests {
         )));
         assert!(opened[0].contains("accounts.google.com"));
 
-        // 戻りは、頼んだものだけが 1 回通る。
-        assert!(accept_link_return(&auth, &callback));
-        assert!(!accept_link_return(&auth, &callback));
+        // 受け口が受けたクエリは、ディープリンクと同じ形にして渡される。頼んだものだけが 1 回通る。
+        let returned = format!("betterauthmulti:///?link={token}");
+        assert!(accept_link_return(&auth, &returned));
+        assert!(!accept_link_return(&auth, &returned));
     }
 
     #[test]
@@ -546,7 +621,13 @@ mod tests {
         let opener = Recording::new(true);
 
         assert_eq!(
-            run(link_google(&AuthState::new(), &store, &web.base, &opener)),
+            run(link_google(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &opener,
+                &Listening::at(51234)
+            )),
             LinkOutcome::NotFresh
         );
         assert!(opener.opened.lock().unwrap().is_empty());
@@ -559,7 +640,13 @@ mod tests {
         let store = signed_in();
         let web = serve(vec![(401, "{}")]);
         assert_eq!(
-            run(link_google(&AuthState::new(), &store, &web.base, &opener)),
+            run(link_google(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &opener,
+                &Listening::at(51234)
+            )),
             LinkOutcome::SessionEnded
         );
         assert!(!has_session(&store));
@@ -574,7 +661,13 @@ mod tests {
         ] {
             let web = serve(vec![(status, body)]);
             assert_eq!(
-                run(link_google(&AuthState::new(), &store, &web.base, &opener)),
+                run(link_google(
+                    &AuthState::new(),
+                    &store,
+                    &web.base,
+                    &opener,
+                    &Listening::at(51234)
+                )),
                 LinkOutcome::Failed,
                 "{status} {body}"
             );
@@ -584,7 +677,8 @@ mod tests {
                 &AuthState::new(),
                 &store,
                 &dead_base(),
-                &opener
+                &opener,
+                &Listening::at(51234)
             )),
             LinkOutcome::Failed
         );
@@ -600,7 +694,8 @@ mod tests {
                 &AuthState::new(),
                 &signed_in(),
                 &web.base,
-                &Recording::new(false)
+                &Recording::new(false),
+                &Listening::at(51234)
             )),
             LinkOutcome::Failed
         );
@@ -639,7 +734,8 @@ mod tests {
                 &AuthState::new(),
                 &store,
                 &web.base,
-                &opener
+                &opener,
+                &Listening::at(51234)
             )),
             GoogleSignInOutcome::Started
         );
@@ -661,10 +757,13 @@ mod tests {
         let states = pending_states(&store);
         assert_eq!(states.len(), 1);
         let callback = body["callbackURL"].as_str().unwrap();
-        assert!(callback.starts_with(&format!("betterauthmulti:///?state={}&cc=", states[0])));
+        assert!(callback.starts_with(&format!(
+            "http://127.0.0.1:51234/cb?state={}&cc=",
+            states[0]
+        )));
         assert_eq!(
             body["errorCallbackURL"],
-            format!("betterauthmulti:///?state={}", states[0]).as_str()
+            format!("http://127.0.0.1:51234/cb?state={}", states[0]).as_str()
         );
         let pending = store.load(Slot::Pending).unwrap().unwrap();
         let verifier = crate::sign_in_rules::parse_pending_list(Some(&pending))[0]
@@ -701,6 +800,7 @@ mod tests {
                 &store,
                 &web.base,
                 &opener,
+                &Listening::at(51234),
             ));
             assert!(
                 matches!(outcome, GoogleSignInOutcome::Failed { .. }),
@@ -713,7 +813,8 @@ mod tests {
                 &AuthState::new(),
                 &store,
                 &dead_base(),
-                &opener
+                &opener,
+                &Listening::at(51234)
             )),
             GoogleSignInOutcome::Failed { status: None }
         );
@@ -729,7 +830,8 @@ mod tests {
                 &AuthState::new(),
                 &MemoryStore::default(),
                 &web.base,
-                &Recording::new(true)
+                &Recording::new(true),
+                &Listening::at(51234)
             )),
             GoogleSignInOutcome::Failed { status: Some(429) }
         );
@@ -741,11 +843,162 @@ mod tests {
                 &AuthState::new(),
                 &store,
                 &web.base,
-                &Recording::new(false)
+                &Recording::new(false),
+                &Listening::at(51234)
             )),
             GoogleSignInOutcome::Failed { status: None }
         );
         assert!(pending_states(&store).is_empty());
+    }
+
+    // --- 受け口(ブラウザの戻りを受ける) ---
+
+    #[test]
+    fn a_receiver_is_opened_for_the_sign_in_and_for_the_linking_and_kept_open() {
+        let web = serve(vec![(200, LINK_ANSWER), (200, LINK_ANSWER)]);
+        let opener = Recording::new(true);
+        let listening = Listening::at(51234);
+        assert_eq!(
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &MemoryStore::default(),
+                &web.base,
+                &opener,
+                &listening
+            )),
+            GoogleSignInOutcome::Started
+        );
+        assert_eq!(
+            run(link_google(
+                &AuthState::new(),
+                &signed_in(),
+                &web.base,
+                &opener,
+                &listening
+            )),
+            LinkOutcome::Started
+        );
+        // 開くのは 1 回ずつ。始められたので、閉じない(戻りを待つ)。
+        assert_eq!(*listening.listened.lock().unwrap(), 2);
+        assert_eq!(*listening.stopped.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn the_receiver_waits_for_the_state_of_the_sign_in_and_the_mark_of_the_linking() {
+        // 受け口が採用するのは、この目印を含む戻りだけ(ほかのページの要求では閉じない)。
+        let web = serve(vec![(200, LINK_ANSWER), (200, LINK_ANSWER)]);
+        let opener = Recording::new(true);
+
+        let store = MemoryStore::default();
+        let listening = Listening::at(51234);
+        run(sign_in_with_google(
+            &AuthState::new(),
+            &store,
+            &web.base,
+            &opener,
+            &listening,
+        ));
+        assert_eq!(*listening.expected.lock().unwrap(), pending_states(&store));
+
+        let listening = Listening::at(51234);
+        run(link_google(
+            &AuthState::new(),
+            &signed_in(),
+            &web.base,
+            &opener,
+            &listening,
+        ));
+        let requests = web.requests.lock().unwrap();
+        let callback = body_of(&requests[1])["callbackURL"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let token = callback.rsplit('=').next().unwrap();
+        assert_eq!(*listening.expected.lock().unwrap(), vec![token.to_string()]);
+    }
+
+    #[test]
+    fn nothing_is_asked_of_the_web_app_when_no_receiver_can_be_opened() {
+        let web = serve(vec![]);
+        let store = MemoryStore::default();
+        let no_receiver = Listening::cannot();
+        let opener = Recording::new(true);
+
+        assert_eq!(
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &opener,
+                &no_receiver
+            )),
+            GoogleSignInOutcome::Failed { status: None }
+        );
+        assert_eq!(
+            run(link_google(
+                &AuthState::new(),
+                &signed_in(),
+                &web.base,
+                &opener,
+                &no_receiver
+            )),
+            LinkOutcome::Failed
+        );
+        assert!(web.requests.lock().unwrap().is_empty());
+        assert!(opener.opened.lock().unwrap().is_empty());
+        // 保存した state も残さない。
+        assert!(pending_states(&store).is_empty());
+    }
+
+    #[test]
+    fn the_receiver_is_closed_when_the_sign_in_or_the_linking_did_not_start() {
+        let opener = Recording::new(true);
+        for (status, body) in [
+            (429, "{}"),
+            (500, "{}"),
+            (200, r#"{"url":"https://evil.example/"}"#),
+        ] {
+            let listening = Listening::at(51234);
+            let web = serve(vec![(status, body)]);
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &MemoryStore::default(),
+                &web.base,
+                &opener,
+                &listening,
+            ));
+            assert_eq!(
+                *listening.stopped.lock().unwrap(),
+                1,
+                "sign-in {status} {body}"
+            );
+
+            let listening = Listening::at(51234);
+            let web = serve(vec![(status, body)]);
+            run(link_google(
+                &AuthState::new(),
+                &signed_in(),
+                &web.base,
+                &opener,
+                &listening,
+            ));
+            assert_eq!(
+                *listening.stopped.lock().unwrap(),
+                1,
+                "link {status} {body}"
+            );
+        }
+        // ブラウザが開けなかったときも。
+        let listening = Listening::at(51234);
+        let web = serve(vec![(200, LINK_ANSWER)]);
+        run(sign_in_with_google(
+            &AuthState::new(),
+            &MemoryStore::default(),
+            &web.base,
+            &Recording::new(false),
+            &listening,
+        ));
+        assert_eq!(*listening.stopped.lock().unwrap(), 1);
     }
 
     // --- 解除 ---
