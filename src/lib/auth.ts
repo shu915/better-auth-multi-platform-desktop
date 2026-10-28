@@ -10,6 +10,15 @@ import {
   type SignOutResult,
 } from './auth-outcomes';
 import { parseDeleteResult, type DeleteResult } from './delete-account';
+import {
+  parseAccountsResult,
+  parseGoogleLinkResult,
+  parseGoogleUnlinkResult,
+  parseLinkReason,
+  type AccountsResult,
+  type GoogleLinkResult,
+  type GoogleUnlinkResult,
+} from './google-outcomes';
 import { parseSaveResult, type SaveResult } from './profile-edit';
 import { parseLoadResult, type LoadResult } from './profile-outcomes';
 
@@ -84,5 +93,41 @@ export async function deleteAccount(confirmEmail: string): Promise<DeleteResult>
     return parseDeleteResult(await invoke<unknown>('delete_account', { confirmEmail }));
   } catch {
     return { kind: 'failed' };
+  }
+}
+
+// Whether Google is linked (the list is read through Rust; the account id never reaches the screen).
+export async function loadAccounts(): Promise<AccountsResult> {
+  try {
+    return parseAccountsResult(await invoke<unknown>('load_accounts'));
+  } catch {
+    return { kind: 'failed' };
+  }
+}
+
+// Starts linking Google: Rust opens the system browser. The result of the linking itself is read
+// from the accounts after the browser comes back.
+export async function linkGoogle(): Promise<GoogleLinkResult> {
+  try {
+    return parseGoogleLinkResult(await invoke<unknown>('link_google'));
+  } catch {
+    return { kind: 'failed' };
+  }
+}
+
+export async function unlinkGoogle(): Promise<GoogleUnlinkResult> {
+  try {
+    return parseGoogleUnlinkResult(await invoke<unknown>('unlink_google'));
+  } catch {
+    return { kind: 'failed' };
+  }
+}
+
+// The reason the web app gave when it turned the last linking down (once; null when there is none).
+export async function takeLinkReason(): Promise<string | null> {
+  try {
+    return parseLinkReason(await invoke<unknown>('take_link_error'));
+  } catch {
+    return null;
   }
 }

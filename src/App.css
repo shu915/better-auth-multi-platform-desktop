@@ -181,3 +181,13 @@ button.danger {
   font-size: 1.1em;
   color: #c0392b;
 }
+
+.methods {
+  border-top: 1px solid #ddd;
+  padding-top: 16px;
+}
+
+.methods h2 {
+  margin: 0;
+  font-size: 1.1em;
+}
