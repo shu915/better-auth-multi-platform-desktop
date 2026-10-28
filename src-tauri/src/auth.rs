@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::async_runtime::Mutex;
 
+use crate::link_rules::{add_token, use_token};
 use crate::secret::{SecretError, Slot, Store};
 use crate::session_cookie::{SessionCookie, parse_session_cookie};
 use crate::sign_in_rules::{
@@ -47,6 +48,10 @@ pub struct AuthState {
     /// という合図だけ)。起動時のリンクは、画面が準備できる前に処理が終わることがあるので、画面が
     /// 後から取れるように、ここに残す。
     last_outcome: StdMutex<Option<AcceptOutcome>>,
+    /// 頼んだ Google の連携の目印(メモリだけ。`link_rules.rs`)。戻りのリンクと突き合わせて、使い切る。
+    link_tokens: StdMutex<Vec<(String, u64)>>,
+    /// 最後の連携の戻りに付いていた、Web が断った理由のコード(あれば)。画面が取りに行く。
+    link_error: StdMutex<Option<String>>,
 }
 
 impl AuthState {
@@ -56,6 +61,8 @@ impl AuthState {
             session_lock: Mutex::new(()),
             seen: StdMutex::new(Vec::new()),
             last_outcome: StdMutex::new(None),
+            link_tokens: StdMutex::new(Vec::new()),
+            link_error: StdMutex::new(None),
         }
     }
 
@@ -78,6 +85,44 @@ impl AuthState {
     /// 残っている結果を渡して、空にする(同じ結果を 2 回表示しない)。
     pub fn take_outcome(&self) -> Option<AcceptOutcome> {
         self.last_outcome.lock().ok()?.take()
+    }
+
+    /// 連携の目印を覚える(戻りのリンクと突き合わせるため)。
+    pub(crate) fn remember_link(&self, token: &str) {
+        if let Ok(mut list) = self.link_tokens.lock() {
+            *list = add_token(&list, token, now_ms());
+        }
+    }
+
+    /// 連携の目印と理由を全部忘れる。ログアウトや退会のあと、前のユーザーの連携の戻りが、次のユーザーの
+    /// 画面に出ないように。
+    pub(crate) fn forget_links(&self) {
+        if let Ok(mut list) = self.link_tokens.lock() {
+            list.clear();
+        }
+        self.set_link_error(None);
+    }
+
+    /// 連携の戻りの理由を残す(なければ空にする)。
+    pub(crate) fn set_link_error(&self, error: Option<String>) {
+        if let Ok(mut last) = self.link_error.lock() {
+            *last = error;
+        }
+    }
+
+    /// 残っている理由を渡して、空にする。
+    pub(crate) fn take_link_error(&self) -> Option<String> {
+        self.link_error.lock().ok()?.take()
+    }
+
+    /// 戻りのリンクの目印が、頼んだもの(有効で、まだ使っていない)なら、使い切って `true`。
+    pub(crate) fn use_link(&self, token: &str) -> bool {
+        let Ok(mut list) = self.link_tokens.lock() else {
+            return false;
+        };
+        let (known, rest) = use_token(&list, token, now_ms());
+        *list = rest;
+        known
     }
 
     /// 初めて見るなら `true`(覚える)。2 回目以降は `false`。
@@ -434,6 +479,7 @@ pub async fn sign_out(auth: &AuthState, store: &dyn Store, base: &str) -> SignOu
             debug_log(&format!("clearing pending failed: {error:?}"));
         }
     }
+    auth.forget_links();
     let deleted = {
         let _guard = auth.session_lock.lock().await;
         store.delete(Slot::Session)

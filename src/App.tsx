@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
+import { SignInMethods } from "./components/sign-in-methods";
 import { listen } from "@tauri-apps/api/event";
 import {
   deleteAccount,
@@ -44,7 +45,10 @@ function App() {
   const [status, setStatus] = useState<Status>("loading");
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  // The "ログイン方法" section has a call in flight: what must not run meanwhile is switched off.
+  const [methodsBusy, setMethodsBusy] = useState(false);
+  const busy = actionBusy || methodsBusy;
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileMessage, setProfileMessage] = useState("");
   // What is being edited. `profile` holds what is saved now; a save compares the two.
@@ -185,12 +189,12 @@ function App() {
   async function guarded(action: () => Promise<void>) {
     if (running.current) return;
     running.current = true;
-    setBusy(true);
+    setActionBusy(true);
     try {
       await action();
     } finally {
       running.current = false;
-      setBusy(false);
+      setActionBusy(false);
     }
   }
 
@@ -333,6 +337,16 @@ function App() {
                 編集
               </button>
             </div>
+            <SignInMethods
+              key={reloadKey}
+              disabled={actionBusy}
+              onWorkingChange={setMethodsBusy}
+              onSessionEnded={() => {
+                clearProfileState();
+                setStatus("signed-out");
+                setMessage(sessionEndedMessage);
+              }}
+            />
             {!deleteOpen ? (
               <button type="button" className="danger" disabled={busy} onClick={() => setDeleteOpen(true)}>
                 退会

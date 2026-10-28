@@ -61,6 +61,41 @@ pub fn parse_name_refusal(body: &Value) -> Option<String> {
     (!shown.is_empty()).then_some(shown)
 }
 
+/// Better Auth の `GET /list-accounts` の答えにある、連携の一覧。Google の行を探すために、`id` と
+/// `providerId` だけ読む(形の違う行は飛ばす。配列でなければ `None`)。
+#[derive(Debug, PartialEq, Eq)]
+pub struct LinkedAccount {
+    pub id: String,
+    pub provider_id: String,
+}
+
+pub fn parse_accounts(body: &Value) -> Option<Vec<LinkedAccount>> {
+    let list = body.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|item| {
+                let id = item.get("id")?.as_str().filter(|s| !s.is_empty())?;
+                let provider_id = item.get("providerId")?.as_str().filter(|s| !s.is_empty())?;
+                Some(LinkedAccount {
+                    id: id.to_string(),
+                    provider_id: provider_id.to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Better Auth の `POST /link-social` と `/sign-in/social` の答え `{ "url": "…" }`(Google の認可 URL)。
+pub fn parse_authorization_url(body: &Value) -> Option<String> {
+    let url = body.get("url")?.as_str()?;
+    (!url.is_empty()).then(|| url.to_string())
+}
+
+/// Better Auth の失敗の答え `{ "code": "SESSION_NOT_FRESH", "message": "…" }` の `code`。
+pub fn parse_error_code(body: &Value) -> Option<&str> {
+    body.get("code")?.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +202,57 @@ mod tests {
         ] {
             assert_eq!(parse_name_refusal(&body), None, "{body}");
         }
+    }
+
+    #[test]
+    fn accounts_are_read_and_odd_rows_are_skipped() {
+        let body = json!([
+            {"id": "a1", "providerId": "google", "x": 1},
+            {"id": "a2", "providerId": "credential"},
+            {"id": "", "providerId": "google"},
+            {"providerId": "google"},
+            {"id": 3, "providerId": "google"},
+            "nope",
+            null
+        ]);
+        assert_eq!(
+            parse_accounts(&body),
+            Some(vec![
+                LinkedAccount {
+                    id: "a1".into(),
+                    provider_id: "google".into()
+                },
+                LinkedAccount {
+                    id: "a2".into(),
+                    provider_id: "credential".into()
+                },
+            ])
+        );
+        assert_eq!(parse_accounts(&json!([])), Some(vec![]));
+        for body in [json!({}), json!(null), json!("x")] {
+            assert_eq!(parse_accounts(&body), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn an_authorization_url_and_an_error_code_are_read() {
+        assert_eq!(
+            parse_authorization_url(&json!({"url": "https://a/b", "redirect": false})).as_deref(),
+            Some("https://a/b")
+        );
+        for body in [
+            json!({"url": ""}),
+            json!({"url": 1}),
+            json!({}),
+            json!(null),
+        ] {
+            assert_eq!(parse_authorization_url(&body), None, "{body}");
+        }
+        assert_eq!(
+            parse_error_code(&json!({"code": "SESSION_NOT_FRESH"})),
+            Some("SESSION_NOT_FRESH")
+        );
+        assert_eq!(parse_error_code(&json!({"code": 1})), None);
+        assert_eq!(parse_error_code(&json!(null)), None);
     }
 }

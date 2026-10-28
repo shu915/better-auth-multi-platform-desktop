@@ -11,12 +11,18 @@ claude-progress.txt (desktop)
 - プロフィール(profile.rs、profile_rules.rs、api_parse.rs、src/lib/profile-*.ts、App.tsx): 名前は Web、bio は Go。閲覧表示 →「編集」で編集フォーム
 - 退会(feat/delete-account、PR 前): account.rs の delete_account が Web の DELETE /api/mobile/account を Bearer で呼ぶ(確認のメールは Web が突き合わせる)。成功でセッションを消す。画面は「退会」ボタン → メールの確認フォーム(src/lib/delete-account.ts)
 
+## 実行中: 段階 5(Google)の 1 つ目 — 連携と解除(ブランチ feat/google、PR 前)
+- google.rs: load_accounts / link_google / unlink_google(Better Auth の list-accounts、link-social、unlink-account を Cookie ヘッダーで)。link_rules.rs: 戻りのリンクの目印(`?link=<32 桁の 16 進>`、メモリだけ、10 分、3 件、1 回で使い切り)、失敗の分類(SESSION_NOT_FRESH だけ「入り直して」)、ブラウザで開く URL(自分の Web のプロキシだけ、認可 URL は accounts.google.com だけ)
+- ブラウザは macOS の `open` を Rust から(Opener トレイト。テストでは記録するだけ)。戻り(ディープリンク)は合図だけ(イベント accounts-changed)。結果は画面が一覧を読み直して決める。戻りの `error` コードは take_link_error で取り、日本語にして見せる
+- ブラウザが「アプリを開く」を抑えて戻りが届かないことがある(連携と解除を繰り返すと 2 回目から)ので、待機中は 2 秒ごとに一覧を読み直す(最大 2 分、連携できたときだけ画面に出す)
+- 実機で確認済み: 連携、解除、繰り返し(戻りが届かなくても反映される)、`account_already_linked_to_different_user` の理由の表示。未確認: 5 分超の「入り直して」、Google の画面でキャンセルして戻る
+- 次: Google でのログイン(連携済みのアカウント)。sign-in/social に state と PKCE の challenge を載せた callbackURL を渡し、プロキシ経由でブラウザを開く。戻りは既存のディープリンクの処理(code の引き換え)が受ける
+
 ## これから
-1. 段階 4(退会)の PR をマージ
-2. Web の open redirect(/api/auth/expo-authorization-proxy)の修正を、別の小さな PR で
-3. 段階 5: Google の連携、解除、連携済みのサインイン(システムのブラウザを Rust から開く)
-4. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認(署名付きで。リリースビルドは、診断を何も出さない点も見る)
-5. あとで: Web の /api/mobile/* の名前の一般化(Web、モバイル、デスクトップを同時に。例 /api/native/*)
+1. 段階 5 の 1 つ目をマージ
+2. 段階 5 の 2 つ目: Google でログイン
+3. 段階 6: 本番(Vercel と Render)の URL を埋め込んでビルドし、実機で確認(署名付きで。リリースビルドは、診断を何も出さない点も見る)
+4. あとで: Web の /api/mobile/* の名前の一般化(Web、モバイル、デスクトップを同時に)。@better-auth/expo の新しい版(1.7.14)で、プロキシの扱いが直っているかを変更履歴で見る
 
 ## 決めたこと
 - 範囲: メールのログイン、プロフィール、退会 → 動いたら Google

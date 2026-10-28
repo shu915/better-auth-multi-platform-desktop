@@ -76,6 +76,8 @@ pub(crate) async fn end_session(auth: &AuthState, store: &dyn Store, used: &Sess
             if let Err(error) = store.delete(Slot::Session) {
                 debug_log(&format!("clearing the ended session failed: {error:?}"));
             }
+            // 前のユーザーの連携の戻りは、次のユーザーに見せない。
+            auth.forget_links();
             true
         }
         None => true,
