@@ -29,9 +29,16 @@ fn is_token(value: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-/// Web に渡す戻り先。成功も、断られた(`errorCallbackURL`)ときも、これに戻る(Web が `error` を足す)。
+/// 連携の戻りのリンクの形(`betterauthmulti:///?link=…`)。受け口が受けたクエリは、この形にしてから、
+/// `link_return_token` に渡す(ディープリンクで届いたものと同じ扱いにするため)。
 pub fn link_callback_url(token: &str) -> String {
     format!("{APP_SCHEME}:///?link={token}")
+}
+
+/// 連携で Web に渡す戻り先: アプリが開いた受け口(`loopback.rs`。`base` は `http://127.0.0.1:<ポート>/cb`)に
+/// 目印を付けたもの。成功も、断られたときも、これに戻る(Web が `error` を足す)。
+pub fn loopback_link_url(base: &str, token: &str) -> String {
+    format!("{base}?link={token}")
 }
 
 /// アプリを開いたリンクが、連携の戻りなら、その目印。ちょうど `<スキーム>:///?link=…`(ホストなし、

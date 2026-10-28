@@ -11,12 +11,13 @@ claude-progress.txt (desktop)
 - プロフィール(profile.rs、profile_rules.rs、api_parse.rs、src/lib/profile-*.ts、App.tsx): 名前は Web、bio は Go。閲覧表示 →「編集」で編集フォーム
 - 退会(feat/delete-account、PR 前): account.rs の delete_account が Web の DELETE /api/mobile/account を Bearer で呼ぶ(確認のメールは Web が突き合わせる)。成功でセッションを消す。画面は「退会」ボタン → メールの確認フォーム(src/lib/delete-account.ts)
 
-## 実行中: 段階 5(Google)の 2 つ目 — Google でログイン(ブランチ feat/google-sign-in、PR 前)
-- 1 つ目(連携と解除、google.rs と link_rules.rs)は main に入った(PR 15)
-- google.rs の sign_in_with_google: メールのリンクと同じ作り。auth.rs の begin_pending で state と PKCE の challenge を作って pending に保存してから、Web の sign-in/social に callbackURL(`betterauthmulti:///?state=…&cc=…`)と errorCallbackURL(`?state=…`)を渡し、認可 URL をもらってブラウザで開く(Web のプロキシ経由)。戻りは既存の accept_sign_in_link が受ける(code と verifier をセッションに引き換え)。始められなかったときは、その state だけ忘れる
-- 画面: ログイン前に「Google でログイン」。Web が断った戻り(連携していない Google など)は `?state=…&error=…` で、既存の「頼んでいないか、期限切れ、または Google が連携されていません」の文言になる
-- 限界: ログインはリンクの `code` で完結するので、ブラウザが「アプリを開く」を抑えると、完了できない(連携と違い、読み直しでは補えない)。もう一度押す
-- 未確認(実機): 連携済みの Google でログイン / 連携していない Google で断られる / Google の画面でキャンセル
+## 実行中: 段階 5(Google)の 3 つ目 — 戻り先をループバックにする(ブランチ feat/loopback-google、PR 前)
+- 1 つ目(連携と解除)と 2 つ目(Google でログイン)は main に入った(PR 15、16)。Web の `POST /api/mobile/exchange-state`(PR 30)も main にある(予備。いまは使わない)
+- 背景: 独自スキームのディープリンクで戻ると、ブラウザが「アプリを開きますか?」を出し、押しても押さなくても結果が変わらず、繰り返すと出なくなる。ポップアップに頼るのをやめ、デスクトップの標準(RFC 8252)のループバックにした。ポーリングの案は作ったが捨てた(git stash に退避してある)
+- loopback.rs(標準ライブラリだけ): `127.0.0.1` の空きポートで受け口を開き、`GET /cb?…` を 1 回だけ受けて閉じる(10 分で自動で閉じる)。Host が `127.0.0.1:<自分のポート>` でなければ断る(DNS リバインディング)。ブラウザには完了のページを返す(入力は埋め込まない)。受けたクエリは `betterauthmulti:///?…` の形にして、ディープリンクと同じ処理(handle_link)に渡す(state の突き合わせと PKCE は、そちらが行う)
+- google.rs: `Receiving` トレイト(lib.rs の LoopbackReceiving が実装)。Google でログインと連携で、戻り先(callbackURL と errorCallbackURL)を `http://127.0.0.1:<port>/cb?…` にする。始められなかったときは受け口を閉じる。メールのリンクは、あとで開くことがあり、アプリが閉じていても起動できるのはディープリンクだけなので、ディープリンクのまま
+- Web 側(別リポジトリ、ブランチ feat/loopback-callback、未コミット): `trustedOrigins` に `http://127.0.0.1:*`、ループバックへの戻りも code に替えて、ブラウザにセッションを置かない。**Web を先に出す**(デスクトップだけ先に出すと、Google が戻れない)
+- 未確認(実機): Google でログイン(ポップアップなしで完了する)/ 連携と解除 / 連携していない Google で断られたときの完了ページ / 連打しても同じ
 
 ## これから
 1. 段階 5 の 2 つ目(Google でログイン)をマージ

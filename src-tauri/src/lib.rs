@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod google;
 pub mod link_rules;
+pub mod loopback;
 pub mod profile;
 pub mod profile_rules;
 mod secret;
@@ -14,7 +15,9 @@ mod test_support;
 
 use account::DeleteOutcome;
 use auth::{AcceptOutcome, AuthState, RequestOutcome, SignOutOutcome};
-use google::{AccountsOutcome, GoogleSignInOutcome, LinkOutcome, SystemOpener, UnlinkOutcome};
+use google::{
+    AccountsOutcome, GoogleSignInOutcome, LinkOutcome, Receiving, SystemOpener, UnlinkOutcome,
+};
 use profile::{LoadOutcome, SaveInput, SaveOutcome};
 use secret::KeychainStore;
 use sign_in_rules::{LinkVerdict, judge_link};
@@ -106,10 +109,15 @@ async fn save_profile(
 /// から、メールのリンクと同じ道(`take_auth_outcome`)で分かる。
 #[tauri::command]
 async fn sign_in_with_google(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AuthState>,
 ) -> Result<GoogleSignInOutcome, String> {
+    let receiving = LoopbackReceiving { app };
     let outcome = match config::web_url() {
-        Ok(web) => google::sign_in_with_google(&state, &KeychainStore, &web, &SystemOpener).await,
+        Ok(web) => {
+            google::sign_in_with_google(&state, &KeychainStore, &web, &SystemOpener, &receiving)
+                .await
+        }
         Err(_) => GoogleSignInOutcome::Failed { status: None },
     };
     Ok(outcome)
@@ -127,9 +135,15 @@ async fn load_accounts(state: tauri::State<'_, AuthState>) -> Result<AccountsOut
 
 /// Google の連携を始める(システムのブラウザを開く)。結果は、戻りのあとに、画面が一覧を読み直して決める。
 #[tauri::command]
-async fn link_google(state: tauri::State<'_, AuthState>) -> Result<LinkOutcome, String> {
+async fn link_google(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AuthState>,
+) -> Result<LinkOutcome, String> {
+    let receiving = LoopbackReceiving { app };
     let outcome = match config::web_url() {
-        Ok(web) => google::link_google(&state, &KeychainStore, &web, &SystemOpener).await,
+        Ok(web) => {
+            google::link_google(&state, &KeychainStore, &web, &SystemOpener, &receiving).await
+        }
         Err(_) => LinkOutcome::Failed,
     };
     Ok(outcome)
@@ -173,6 +187,31 @@ async fn sign_out(state: tauri::State<'_, AuthState>) -> Result<SignOutOutcome, 
         Err(_) => auth::sign_out(&state, &KeychainStore, "").await,
     };
     Ok(outcome)
+}
+
+/// ブラウザの戻りを受ける受け口(`loopback.rs`)を開く。戻りのクエリは、ディープリンクで届いたものと
+/// 同じ形(`betterauthmulti:///?…`)にして、同じ処理(`handle_link`)に渡す。
+struct LoopbackReceiving {
+    app: tauri::AppHandle,
+}
+
+impl Receiving for LoopbackReceiving {
+    fn listen(&self, expect: &str) -> Option<String> {
+        let app = self.app.clone();
+        let receiver = loopback::start(
+            expect.to_string(),
+            move |query| handle_link(app, format!("{}:///?{query}", sign_in_rules::APP_SCHEME)),
+            loopback::LIFETIME,
+        )
+        .ok()?;
+        let base = loopback::base_url(receiver.port);
+        self.app.state::<AuthState>().replace_receiver(receiver);
+        Some(base)
+    }
+
+    fn stop(&self) {
+        self.app.state::<AuthState>().cancel_receiver();
+    }
 }
 
 /// OS から渡されたリンク(`betterauthmulti://…`)を、ログインの処理に回す。

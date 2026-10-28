@@ -19,6 +19,7 @@ use serde::Serialize;
 use tauri::async_runtime::Mutex;
 
 use crate::link_rules::{add_token, use_token};
+use crate::loopback::Receiver;
 use crate::secret::{SecretError, Slot, Store};
 use crate::session_cookie::{SessionCookie, parse_session_cookie};
 use crate::sign_in_rules::{
@@ -52,6 +53,8 @@ pub struct AuthState {
     link_tokens: StdMutex<Vec<(String, u64)>>,
     /// 最後の連携の戻りに付いていた、Web が断った理由のコード(あれば)。画面が取りに行く。
     link_error: StdMutex<Option<String>>,
+    /// いま開いている、ブラウザの戻りの受け口(`loopback.rs`)。新しくログインや連携を始めたら、古いものは閉じる。
+    receiver: StdMutex<Option<Receiver>>,
 }
 
 impl AuthState {
@@ -63,6 +66,7 @@ impl AuthState {
             last_outcome: StdMutex::new(None),
             link_tokens: StdMutex::new(Vec::new()),
             link_error: StdMutex::new(None),
+            receiver: StdMutex::new(None),
         }
     }
 
@@ -94,6 +98,24 @@ impl AuthState {
         }
     }
 
+    /// 新しい受け口を覚える。前の受け口(まだ戻りを受けていないもの)は閉じる。
+    pub(crate) fn replace_receiver(&self, new: Receiver) {
+        if let Ok(mut slot) = self.receiver.lock()
+            && let Some(old) = slot.replace(new)
+        {
+            old.cancel();
+        }
+    }
+
+    /// 開いている受け口を閉じる。
+    pub(crate) fn cancel_receiver(&self) {
+        if let Ok(mut slot) = self.receiver.lock()
+            && let Some(old) = slot.take()
+        {
+            old.cancel();
+        }
+    }
+
     /// 連携の目印と理由を全部忘れる。ログアウトや退会のあと、前のユーザーの連携の戻りが、次のユーザーの
     /// 画面に出ないように。
     pub(crate) fn forget_links(&self) {
@@ -101,6 +123,7 @@ impl AuthState {
             list.clear();
         }
         self.set_link_error(None);
+        self.cancel_receiver();
     }
 
     /// 連携の戻りの理由を残す(なければ空にする)。

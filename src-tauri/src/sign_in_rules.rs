@@ -50,6 +50,18 @@ pub fn callback_url(state: &str, challenge: &str) -> String {
     format!("{APP_SCHEME}:///?state={state}&cc={challenge}")
 }
 
+/// Google のログインで Web に渡す `callbackURL`: アプリが開いた受け口(`loopback.rs`。`base` は
+/// `http://127.0.0.1:<ポート>/cb`)に、`state` と PKCE の challenge を付けたもの。メールのリンクは、
+/// アプリが閉じていても起動できるディープリンク(`callback_url`)のまま。
+pub fn loopback_callback_url(base: &str, state: &str, challenge: &str) -> String {
+    format!("{base}?state={state}&cc={challenge}")
+}
+
+/// Web が断った(連携していない Google など)ときの戻り先。`state` がないと、アプリは戻りを無視する。
+pub fn loopback_error_url(base: &str, state: &str) -> String {
+    format!("{base}?state={state}")
+}
+
 /// `{:?}` でログに出ても、verifier(PKCE の秘密)は出さない。
 impl std::fmt::Debug for Pending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
