@@ -12,7 +12,7 @@
 use serde::Serialize;
 
 use crate::api_parse::{LinkedAccount, parse_accounts, parse_authorization_url, parse_error_code};
-use crate::auth::{AuthState, client};
+use crate::auth::{AuthState, begin_pending, client, forget_pending};
 use crate::link_rules::{
     AccountFailure, classify_account_failure, link_callback_url, link_return_token, proxy_url,
     token_from_bytes,
@@ -20,7 +20,7 @@ use crate::link_rules::{
 use crate::profile::{Reply, call, end_session, read_session};
 use crate::secret::Store;
 use crate::session_cookie::SessionCookie;
-use crate::sign_in_rules::APP_SCHEME;
+use crate::sign_in_rules::{APP_SCHEME, callback_url};
 
 const GOOGLE: &str = "google";
 
@@ -215,6 +215,68 @@ pub async fn link_google(
 /// 頼んでいないもの、2 回目、古いものは `false`(画面に何も出さない)。
 pub fn accept_link_return(auth: &AuthState, link: &str) -> bool {
     link_return_token(link).is_some_and(|token| auth.use_link(&token))
+}
+
+// --- Google でログイン ---
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GoogleSignInOutcome {
+    /// ブラウザを開いた。結果は、ブラウザから戻るリンク(`state` と `code`)が届いてから、メールの
+    /// リンクと同じ道で決まる(`accept_sign_in_link`)。
+    Started,
+    /// 始められなかった。`status` は、Web が答えたときの HTTP ステータス(429 は「回数が多すぎる」)。
+    Failed { status: Option<u16> },
+}
+
+/// 連携済みの Google で、ログインを始める(セッションがないとき)。メールのリンクと同じ作り: `state` と
+/// PKCE の challenge を戻り先に載せ、verifier は Mac の外に出さない。ブラウザは、Web のプロキシ経由で
+/// 開く。戻りは `betterauthmulti:///?state=…&code=…`(成功)か、`?state=…&error=…`(Web が断った。
+/// 連携していない Google、新規登録の禁止など)。どちらも、既存のディープリンクの処理が受ける。
+pub async fn sign_in_with_google(
+    auth: &AuthState,
+    store: &dyn Store,
+    web: &str,
+    opener: &dyn Opener,
+) -> GoogleSignInOutcome {
+    let failed = |status| GoogleSignInOutcome::Failed { status };
+    let Ok(http) = client() else {
+        return failed(None);
+    };
+    let Ok((state, challenge)) = begin_pending(auth, store).await else {
+        return failed(None);
+    };
+
+    // 始められなかったら、この state だけ忘れる(待っても、戻りは来ない)。
+    let reply = call(
+        http.post(format!("{web}/api/auth/sign-in/social"))
+            .header("expo-origin", origin())
+            .json(&serde_json::json!({
+                "provider": GOOGLE,
+                "callbackURL": callback_url(&state, &challenge),
+                // 断られたときの戻り先。`state` がないと、アプリは戻りを無視するので、載せる。
+                "errorCallbackURL": format!("{APP_SCHEME}:///?state={state}"),
+                "disableRedirect": true,
+            })),
+    )
+    .await;
+    let proxy = match &reply {
+        Some(reply) if reply.status == 200 => reply
+            .body
+            .as_ref()
+            .and_then(parse_authorization_url)
+            .and_then(|authorization| proxy_url(web, &authorization)),
+        _ => None,
+    };
+    let Some(proxy) = proxy else {
+        forget_pending(auth, store, &state).await;
+        return failed(reply.map(|r| r.status));
+    };
+    if !opener.open(&proxy) {
+        forget_pending(auth, store, &state).await;
+        return failed(None);
+    }
+    GoogleSignInOutcome::Started
 }
 
 // --- 解除 ---
@@ -554,6 +616,136 @@ mod tests {
         ] {
             assert!(!SystemOpener.open(url), "{url}");
         }
+    }
+
+    // --- Google でログイン ---
+
+    fn pending_states(store: &MemoryStore) -> Vec<String> {
+        let raw = store.load(Slot::Pending).unwrap();
+        crate::sign_in_rules::parse_pending_list(raw.as_deref())
+            .into_iter()
+            .map(|p| p.state)
+            .collect()
+    }
+
+    #[test]
+    fn signing_in_with_google_sends_a_state_and_a_challenge_and_opens_our_proxy() {
+        let web = serve(vec![(200, LINK_ANSWER)]);
+        let store = MemoryStore::default();
+        let opener = Recording::new(true);
+
+        assert_eq!(
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &opener
+            )),
+            GoogleSignInOutcome::Started
+        );
+
+        let requests = web.requests.lock().unwrap();
+        assert!(requests[0].starts_with("POST /api/auth/sign-in/social "));
+        // ログイン前なので、セッションは送らない。
+        assert_eq!(header_of(&requests[0], "cookie"), None);
+        assert_eq!(header_of(&requests[0], "authorization"), None);
+        assert_eq!(
+            header_of(&requests[0], "expo-origin").as_deref(),
+            Some("betterauthmulti://")
+        );
+        let body = body_of(&requests[0]);
+        assert_eq!(body["provider"], "google");
+        assert_eq!(body["disableRedirect"], true);
+
+        // 保存した state と同じものが、戻り先に載る。PKCE の challenge も載る(verifier は載らない)。
+        let states = pending_states(&store);
+        assert_eq!(states.len(), 1);
+        let callback = body["callbackURL"].as_str().unwrap();
+        assert!(callback.starts_with(&format!("betterauthmulti:///?state={}&cc=", states[0])));
+        assert_eq!(
+            body["errorCallbackURL"],
+            format!("betterauthmulti:///?state={}", states[0]).as_str()
+        );
+        let pending = store.load(Slot::Pending).unwrap().unwrap();
+        let verifier = crate::sign_in_rules::parse_pending_list(Some(&pending))[0]
+            .verifier
+            .clone();
+        assert!(!requests[0].contains(&verifier));
+
+        let opened = opener.opened.lock().unwrap();
+        assert_eq!(opened.len(), 1);
+        assert!(opened[0].starts_with(&format!(
+            "{}/api/auth/expo-authorization-proxy?authorizationURL=",
+            web.base
+        )));
+    }
+
+    #[test]
+    fn a_google_sign_in_that_did_not_start_forgets_only_its_own_state() {
+        let store = MemoryStore::default();
+        // 先に、別の要求(メールのリンクなど)が 1 件ある。
+        run(crate::auth::begin_pending(&AuthState::new(), &store)).unwrap();
+        let earlier = pending_states(&store);
+        assert_eq!(earlier.len(), 1);
+
+        let opener = Recording::new(true);
+        for (status, body) in [
+            (429, "{}"),
+            (500, "{}"),
+            (200, r#"{"url":"https://evil.example/"}"#),
+            (200, "<html>proxy</html>"),
+        ] {
+            let web = serve(vec![(status, body)]);
+            let outcome = run(sign_in_with_google(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &opener,
+            ));
+            assert!(
+                matches!(outcome, GoogleSignInOutcome::Failed { .. }),
+                "{status} {body}"
+            );
+            assert_eq!(pending_states(&store), earlier, "{status} {body}");
+        }
+        assert_eq!(
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &store,
+                &dead_base(),
+                &opener
+            )),
+            GoogleSignInOutcome::Failed { status: None }
+        );
+        assert_eq!(pending_states(&store), earlier);
+        assert!(opener.opened.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_refusal_tells_the_status_and_a_browser_that_cannot_open_forgets_the_state() {
+        let web = serve(vec![(429, "{}")]);
+        assert_eq!(
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &MemoryStore::default(),
+                &web.base,
+                &Recording::new(true)
+            )),
+            GoogleSignInOutcome::Failed { status: Some(429) }
+        );
+
+        let store = MemoryStore::default();
+        let web = serve(vec![(200, LINK_ANSWER)]);
+        assert_eq!(
+            run(sign_in_with_google(
+                &AuthState::new(),
+                &store,
+                &web.base,
+                &Recording::new(false)
+            )),
+            GoogleSignInOutcome::Failed { status: None }
+        );
+        assert!(pending_states(&store).is_empty());
     }
 
     // --- 解除 ---

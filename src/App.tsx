@@ -8,6 +8,7 @@ import {
   loadProfile,
   requestSignInLink,
   saveProfile,
+  signInWithGoogle,
   signOut,
   takeLinkResult,
 } from "./lib/auth";
@@ -16,6 +17,7 @@ import {
   screenAfterRefresh,
   signOutFailedMessage,
 } from "./lib/auth-outcomes";
+import { signInStartFailedMessage, signInWaitingMessage } from "./lib/google-outcomes";
 import {
   canDelete,
   deletedMessage,
@@ -298,6 +300,13 @@ function App() {
       }
     });
 
+  const signInGoogle = () =>
+    guarded(async () => {
+      setMessage("");
+      const result = await signInWithGoogle();
+      setMessage(result.kind === "started" ? signInWaitingMessage : signInStartFailedMessage(result));
+    });
+
   const logout = () =>
     guarded(async () => {
       setMessage("");
@@ -480,6 +489,11 @@ function App() {
           ログインのリンクを送る
         </button>
       </form>
+      <div className="row">
+        <button type="button" disabled={busy} onClick={() => void signInGoogle()}>
+          Google でログイン
+        </button>
+      </div>
       <p>{message}</p>
     </main>
   );

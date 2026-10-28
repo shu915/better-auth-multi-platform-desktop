@@ -73,7 +73,7 @@ export function requestMessage(result: RequestResult): string {
 // looked right but could not be traded for a session. Neither says why in detail.
 export function linkMessage(result: LinkResult): string {
   if (result.kind === 'rejected') {
-    return 'このリンクでは、ログインできません(このアプリから頼んだものではないか、期限が切れています)。もう一度リンクを頼んでください。';
+    return 'このリンクでは、ログインできません(このアプリから頼んだものではない、期限切れ、または Google が連携されていません)。もう一度お試しください。';
   }
   return 'ログインできませんでした。もう一度リンクを頼んでください。';
 }
