@@ -14,7 +14,7 @@ mod test_support;
 
 use account::DeleteOutcome;
 use auth::{AcceptOutcome, AuthState, RequestOutcome, SignOutOutcome};
-use google::{AccountsOutcome, LinkOutcome, SystemOpener, UnlinkOutcome};
+use google::{AccountsOutcome, GoogleSignInOutcome, LinkOutcome, SystemOpener, UnlinkOutcome};
 use profile::{LoadOutcome, SaveInput, SaveOutcome};
 use secret::KeychainStore;
 use sign_in_rules::{LinkVerdict, judge_link};
@@ -98,6 +98,19 @@ async fn save_profile(
             refusal: None,
             name_saved: None,
         },
+    };
+    Ok(outcome)
+}
+
+/// 連携済みの Google でログインを始める(システムのブラウザを開く)。結果は、ブラウザから戻るリンクが届いて
+/// から、メールのリンクと同じ道(`take_auth_outcome`)で分かる。
+#[tauri::command]
+async fn sign_in_with_google(
+    state: tauri::State<'_, AuthState>,
+) -> Result<GoogleSignInOutcome, String> {
+    let outcome = match config::web_url() {
+        Ok(web) => google::sign_in_with_google(&state, &KeychainStore, &web, &SystemOpener).await,
+        Err(_) => GoogleSignInOutcome::Failed { status: None },
     };
     Ok(outcome)
 }
@@ -251,6 +264,7 @@ pub fn run() {
             take_auth_outcome,
             load_profile,
             save_profile,
+            sign_in_with_google,
             load_accounts,
             link_google,
             unlink_google,

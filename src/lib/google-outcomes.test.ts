@@ -8,6 +8,8 @@ import {
   notLinkedMessage,
   parseAccountsResult,
   parseGoogleLinkResult,
+  parseGoogleSignInStart,
+  signInStartFailedMessage,
   parseLinkReason,
   LINK_POLL_MAX_MS,
   shouldKeepPolling,
@@ -115,5 +117,22 @@ describe('shouldKeepPolling', () => {
     expect(shouldKeepPolling(1000, 1000)).toBe(true);
     expect(shouldKeepPolling(1000, 1000 + LINK_POLL_MAX_MS - 1)).toBe(true);
     expect(shouldKeepPolling(1000, 1000 + LINK_POLL_MAX_MS)).toBe(false);
+  });
+});
+
+describe('signing in with Google', () => {
+  it('reads how it started, and never takes something unexpected for a start', () => {
+    expect(parseGoogleSignInStart({ kind: 'started' })).toEqual({ kind: 'started' });
+    expect(parseGoogleSignInStart({ kind: 'failed', status: 429 })).toEqual({ kind: 'failed', status: 429 });
+    expect(parseGoogleSignInStart({ kind: 'failed', status: null })).toEqual({ kind: 'failed', status: null });
+    for (const value of [null, undefined, 'started', 1, {}, { kind: 'Started' }]) {
+      expect(parseGoogleSignInStart(value)).toEqual({ kind: 'failed', status: null });
+    }
+  });
+
+  it('says what to do when it did not start', () => {
+    expect(signInStartFailedMessage({ kind: 'failed', status: 429 })).toContain('回数');
+    expect(signInStartFailedMessage({ kind: 'failed', status: null })).toContain('始められません');
+    expect(signInStartFailedMessage({ kind: 'started' })).toBe('');
   });
 });

@@ -148,3 +148,22 @@ export const LINK_POLL_MAX_MS = 2 * 60 * 1000;
 export function shouldKeepPolling(startedAt: number, now: number): boolean {
   return now - startedAt < LINK_POLL_MAX_MS;
 }
+
+// Signing in with Google (a user who linked it): Rust opens the browser. Whether the user got in is
+// known when the link the browser comes back with is handled (the same way as the mail link).
+export type GoogleSignInStart = { kind: 'started' } | { kind: 'failed'; status: number | null };
+
+export function parseGoogleSignInStart(value: unknown): GoogleSignInStart {
+  if (!isRecord(value)) return { kind: 'failed', status: null };
+  if (value.kind === 'started') return { kind: 'started' };
+  return { kind: 'failed', status: typeof value.status === 'number' ? value.status : null };
+}
+
+export const signInWaitingMessage =
+  'ブラウザで Google の画面を開きました。終わると、このアプリに戻ってログインします。';
+
+export function signInStartFailedMessage(result: GoogleSignInStart): string {
+  if (result.kind === 'started') return '';
+  if (result.status === 429) return '回数が多すぎます。しばらくしてからもう一度お試しください。';
+  return 'Google でのログインを始められませんでした。接続を確かめて、もう一度お試しください。';
+}

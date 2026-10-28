@@ -13,10 +13,12 @@ import { parseDeleteResult, type DeleteResult } from './delete-account';
 import {
   parseAccountsResult,
   parseGoogleLinkResult,
+  parseGoogleSignInStart,
   parseGoogleUnlinkResult,
   parseLinkReason,
   type AccountsResult,
   type GoogleLinkResult,
+  type GoogleSignInStart,
   type GoogleUnlinkResult,
 } from './google-outcomes';
 import { parseSaveResult, type SaveResult } from './profile-edit';
@@ -129,5 +131,15 @@ export async function takeLinkReason(): Promise<string | null> {
     return parseLinkReason(await invoke<unknown>('take_link_error'));
   } catch {
     return null;
+  }
+}
+
+// Starts signing in with Google (for a user who linked it): Rust opens the system browser. The user
+// is signed in when the browser comes back with the link, the way a mail link does.
+export async function signInWithGoogle(): Promise<GoogleSignInStart> {
+  try {
+    return parseGoogleSignInStart(await invoke<unknown>('sign_in_with_google'));
+  } catch {
+    return { kind: 'failed', status: null };
   }
 }

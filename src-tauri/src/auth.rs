@@ -252,6 +252,35 @@ fn request_failed(reason: &str, status: Option<u16>) -> RequestOutcome {
     }
 }
 
+/// ログインの要求を始める。32 バイトの verifier と 16 バイトの state を作り、**送る前に** pending に
+/// 保存する(リンクが先に戻ってきても、突き合わせられるように)。verifier は Mac の外に出さない。
+/// 渡すのは、Web に送ってよい `(state, challenge)` だけ。乱数が取れない、保存できないときは何も送らず、
+/// 理由の種類を返す。メールのリンクと Google のログインが、同じ形で使う。
+pub(crate) async fn begin_pending(
+    auth: &AuthState,
+    store: &dyn Store,
+) -> Result<(String, String), &'static str> {
+    let (mut verifier_bytes, mut state_bytes) = ([0u8; 32], [0u8; 16]);
+    if getrandom::fill(&mut verifier_bytes).is_err() || getrandom::fill(&mut state_bytes).is_err() {
+        return Err("random failed");
+    }
+    let verifier = verifier_from_bytes(&verifier_bytes);
+    let challenge = challenge_for(&verifier);
+    let state = state_from_bytes(&state_bytes);
+    let now = now_ms();
+    update_pending(auth, store, |list| {
+        add_pending(&list, &state, &verifier, now)
+    })
+    .await
+    .map_err(|_| "storage failed")?;
+    Ok((state, challenge))
+}
+
+/// Web に断られた、または送れなかった要求の state だけを忘れる(他の要求は残す)。
+pub(crate) async fn forget_pending(auth: &AuthState, store: &dyn Store, state: &str) {
+    let _ = update_pending(auth, store, |list| remove_pending(&list, state)).await;
+}
+
 pub async fn request_sign_in_link(
     auth: &AuthState,
     store: &dyn Store,
@@ -265,25 +294,10 @@ pub async fn request_sign_in_link(
         return request_failed("http client failed", None);
     };
 
-    // 32 バイトの verifier と、16 バイトの state。乱数が取れなければ、何も送らない。
-    let (mut verifier_bytes, mut state_bytes) = ([0u8; 32], [0u8; 16]);
-    if getrandom::fill(&mut verifier_bytes).is_err() || getrandom::fill(&mut state_bytes).is_err() {
-        return request_failed("random failed", None);
-    }
-    let verifier = verifier_from_bytes(&verifier_bytes);
-    let challenge = challenge_for(&verifier);
-    let state = state_from_bytes(&state_bytes);
-
-    // 送る前に覚える。リンクが先に戻ってきても、突き合わせられるようにする。
-    let now = now_ms();
-    if update_pending(auth, store, |list| {
-        add_pending(&list, &state, &verifier, now)
-    })
-    .await
-    .is_err()
-    {
-        return request_failed("storage failed", None);
-    }
+    let (state, challenge) = match begin_pending(auth, store).await {
+        Ok(begun) => begun,
+        Err(reason) => return request_failed(reason, None),
+    };
 
     let sent = client
         .post(format!("{base}/api/auth/sign-in/magic-link"))
@@ -300,7 +314,7 @@ pub async fn request_sign_in_link(
             let status = res.status().as_u16();
             // Web が答えて断った: この state のメールは存在しない。その 1 件だけ忘れる。
             if status >= 400 {
-                let _ = update_pending(auth, store, |list| remove_pending(&list, &state)).await;
+                forget_pending(auth, store, &state).await;
             }
             request_failed(&format!("request failed ({status})"), Some(status))
         }
@@ -342,10 +356,14 @@ pub async fn accept_sign_in_link(
         LinkVerdict::Ignored => return AcceptOutcome::Ignored,
         LinkVerdict::Rejected(reason) => {
             // 拒否も 2 回届くことがある。state ごとに 1 回だけ知らせる。
-            if let Some(state) = link_state(link)
-                && !auth.first_time(refused_key(&state))
-            {
-                return AcceptOutcome::Ignored;
+            if let Some(state) = link_state(link) {
+                if !auth.first_time(refused_key(&state)) {
+                    return AcceptOutcome::Ignored;
+                }
+                // Web が断った(`error` 付きの)リンクの state は、もう使われない。待たせずに枠を空ける
+                // (頼んだ state を知っているのは、このアプリと Web だけ。他のリンクの state は、
+                // 一致しないので、何も消えない)。
+                forget_pending(auth, store, &state).await;
             }
             return AcceptOutcome::Rejected {
                 reason: reason.to_string(),
@@ -775,6 +793,46 @@ mod tests {
             AcceptOutcome::Ignored
         );
         assert!(!is_signed_in(&store));
+    }
+
+    #[test]
+    fn a_refusal_from_the_web_app_frees_the_slot_of_that_request_only() {
+        let (auth, store) = (AuthState::new(), MemoryStore::default());
+        for state in ["st1", "st2"] {
+            run(update_pending(&auth, &store, |list| {
+                add_pending(&list, state, VERIFIER, now_ms())
+            }))
+            .unwrap();
+        }
+        let refused = "betterauthmulti:///?state=st1&error=signup_disabled";
+        assert!(matches!(
+            run(accept_sign_in_link(&auth, &store, &dead_base(), refused)),
+            AcceptOutcome::Rejected { .. }
+        ));
+        let states: Vec<String> = pending_list(&store).into_iter().map(|p| p.state).collect();
+        assert_eq!(states, vec!["st2".to_string()]);
+
+        // 知らない state の断りは、何も消さない。
+        let stranger = "betterauthmulti:///?state=zzz&error=x";
+        assert!(matches!(
+            run(accept_sign_in_link(&auth, &store, &dead_base(), stranger)),
+            AcceptOutcome::Rejected { .. }
+        ));
+        assert_eq!(pending_list(&store).len(), 1);
+    }
+
+    #[test]
+    fn beginning_more_requests_than_there_are_slots_pushes_out_the_oldest() {
+        let (auth, store) = (AuthState::new(), MemoryStore::default());
+        let mut states = Vec::new();
+        for _ in 0..4 {
+            let (state, _) = run(begin_pending(&auth, &store)).unwrap();
+            states.push(state);
+        }
+        let kept: Vec<String> = pending_list(&store).into_iter().map(|p| p.state).collect();
+        assert_eq!(kept.len(), crate::sign_in_rules::MAX_PENDING);
+        assert!(!kept.contains(&states[0]));
+        assert!(kept.contains(&states[3]));
     }
 
     #[test]
